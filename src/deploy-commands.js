@@ -4,6 +4,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  ChannelType,
   InteractionContextType,
   PermissionFlagsBits
 } = require('discord.js');
@@ -18,6 +19,27 @@ const commands = [
     .setDescription('Setup the Enclave RP ticket panel')
     .setContexts(guildOnly)
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
+    .setName('quick-setup')
+    .setDescription('Create the ticket categories, staff role and panel automatically')
+    .setContexts(guildOnly)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addRoleOption((option) =>
+      option
+        .setName('staff_role')
+        .setDescription('Staff role to give ticket access (default: create "Ticket Staff")')
+    )
+    .addChannelOption((option) =>
+      option
+        .setName('panel_channel')
+        .setDescription('Channel to post the panel in (default: create #tickets)')
+        .addChannelTypes(ChannelType.GuildText)
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName('separate_categories')
+        .setDescription('One category per section instead of a single shared category')
+    ),
   new SlashCommandBuilder()
     .setName('ticket-panel')
     .setDescription('Resend the saved ticket panel in this channel')

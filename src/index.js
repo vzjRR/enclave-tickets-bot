@@ -477,6 +477,7 @@ async function canManageTicket(interaction) {
 // sticks. Authorization has to be re-checked here for it to mean anything.
 const GUILD_MANAGER_COMMANDS = new Set([
   'setup',
+  'quick-setup',
   'ticket-panel',
   'ticket-section-add',
   'tickets-refresh'
@@ -1439,6 +1440,234 @@ async function openTicket(interaction, sectionId, reason) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Automatic server setup
+//
+// The /setup flow needs an admin to hand-pick a category and staff roles for
+// every section. /quick-setup builds the whole structure instead. It is
+// idempotent: roles, categories and channels are matched by name and reused, so
+// running it twice does not duplicate anything.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SECTIONS = [
+  { name: 'استفسارات', emoji: '❓' },
+  { name: 'مشكلة تقنية', emoji: '⚠️' },
+  { name: 'شكوى ورقابة', emoji: '🕵️' },
+  { name: 'مراجعة باند', emoji: '⛔' },
+  { name: 'طلب تعويض', emoji: '💸' },
+  { name: 'المتجر', emoji: '💰' }
+];
+
+const STAFF_ROLE_NAME = 'Ticket Staff';
+const TICKET_CATEGORY_NAME = '🎫 TICKETS';
+const PANEL_CHANNEL_NAME = 'tickets';
+
+const REQUIRED_BOT_PERMISSIONS = [
+  ['Manage Channels', PermissionFlagsBits.ManageChannels],
+  ['Manage Roles', PermissionFlagsBits.ManageRoles],
+  ['View Channels', PermissionFlagsBits.ViewChannel],
+  ['Send Messages', PermissionFlagsBits.SendMessages],
+  ['Embed Links', PermissionFlagsBits.EmbedLinks],
+  ['Manage Messages', PermissionFlagsBits.ManageMessages],
+  ['Read Message History', PermissionFlagsBits.ReadMessageHistory]
+];
+
+function missingBotPermissions(guild) {
+  const me = guild.members.me;
+  return REQUIRED_BOT_PERMISSIONS
+    .filter(([, flag]) => !me?.permissions.has(flag))
+    .map(([label]) => label);
+}
+
+function ticketAreaOverwrites(guild, staffRoleId) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    {
+      id: staffRoleId,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.ManageMessages
+      ]
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.ManageMessages,
+        PermissionFlagsBits.ReadMessageHistory
+      ]
+    }
+  ];
+}
+
+async function ensureStaffRole(guild, providedRole, created) {
+  if (providedRole) return providedRole;
+
+  const existing = guild.roles.cache.find((role) => role.name === STAFF_ROLE_NAME);
+  if (existing) return existing;
+
+  // Created with no guild-wide permissions on purpose: everything this role can
+  // do comes from the channel overwrites below, and a bot can never grant a
+  // permission it does not itself hold.
+  const role = await guild.roles.create({
+    name: STAFF_ROLE_NAME,
+    color: BRAND_COLOR,
+    mentionable: true,
+    permissions: [],
+    reason: `${BRAND_NAME} tickets: staff role`
+  });
+
+  created.roles.push(role.name);
+  return role;
+}
+
+async function ensureTicketCategory(guild, name, staffRoleId, created) {
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildCategory && channel.name === name
+  );
+  if (existing) return existing;
+
+  const category = await guild.channels.create({
+    name,
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: ticketAreaOverwrites(guild, staffRoleId),
+    reason: `${BRAND_NAME} tickets: ticket category`
+  });
+
+  created.categories.push(name);
+  return category;
+}
+
+async function ensurePanelChannel(guild, providedChannel, created) {
+  if (providedChannel) return providedChannel;
+
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildText && channel.name === PANEL_CHANNEL_NAME
+  );
+  if (existing) return existing;
+
+  // Everyone can see the panel and use the menu, but not post in the channel.
+  const channel = await guild.channels.create({
+    name: PANEL_CHANNEL_NAME,
+    type: ChannelType.GuildText,
+    topic: `${BRAND_NAME} | اختر القسم المناسب من القائمة لفتح تذكرة`,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+        deny: [PermissionFlagsBits.SendMessages]
+      },
+      {
+        id: client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.EmbedLinks,
+          PermissionFlagsBits.ManageMessages,
+          PermissionFlagsBits.ReadMessageHistory
+        ]
+      }
+    ],
+    reason: `${BRAND_NAME} tickets: panel channel`
+  });
+
+  created.channels.push(channel.name);
+  return channel;
+}
+
+async function runQuickSetup(interaction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const guild = interaction.guild;
+  const missing = missingBotPermissions(guild);
+  if (missing.length) {
+    await interaction.editReply({
+      content: [
+        `لا أملك الصلاحيات التالية: **${missing.join(', ')}**`,
+        'أعد دعوة البوت بهذه الصلاحيات ثم أعد تشغيل الأمر.'
+      ].join('\n')
+    });
+    return;
+  }
+
+  const created = { roles: [], categories: [], channels: [] };
+  const providedRole = interaction.options.getRole('staff_role');
+  const providedChannel = interaction.options.getChannel('panel_channel');
+  const separateCategories = interaction.options.getBoolean('separate_categories') ?? false;
+
+  const staffRole = await ensureStaffRole(guild, providedRole, created);
+
+  const sharedCategory = separateCategories
+    ? null
+    : await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, staffRole.id, created);
+
+  const sections = [];
+  for (const [index, template] of DEFAULT_SECTIONS.entries()) {
+    const category = sharedCategory
+      || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, staffRole.id, created);
+
+    sections.push({
+      id: `${Date.now()}${index}`,
+      name: template.name,
+      emoji: template.emoji,
+      categoryId: category.id,
+      roleIds: [staffRole.id]
+    });
+  }
+
+  const panelChannel = await ensurePanelChannel(guild, providedChannel, created);
+
+  const existing = getGuildConfig(guild.id);
+  const config = ensureTicketInstance({
+    ...(existing || {}),
+    title: existing?.title || `${BRAND_NAME} - نظام التذاكر`,
+    description: existing?.description
+      || 'مرحبا بك في نظام الدعم الفني.\nاختر القسم المناسب من القائمة بالأسفل واشرح مشكلتك بالتفصيل.',
+    color: existing?.color || BRAND_COLOR,
+    sections,
+    ticketCounter: Number(existing?.ticketCounter) || 2000
+  });
+
+  const message = await panelChannel.send({
+    embeds: [buildPanelEmbed(config)],
+    components: [buildPanelMenu(config)]
+  });
+
+  setGuildConfig(guild.id, {
+    ...config,
+    channelId: panelChannel.id,
+    messageId: message.id,
+    updatedAt: new Date().toISOString()
+  });
+
+  const line = (label, items) => (items.length ? `${label}: ${items.join('، ')}` : `${label}: لا شيء جديد`);
+
+  await interaction.editReply({
+    content: [
+      `تم إعداد نظام التذاكر في **${guild.name}**.`,
+      '',
+      `اللوحة: <#${panelChannel.id}>`,
+      `رتبة الطاقم: <@&${staffRole.id}>`,
+      `الأقسام: ${sections.length}`,
+      '',
+      line('رتب أنشئت', created.roles),
+      line('تصنيفات أنشئت', created.categories),
+      line('قنوات أنشئت', created.channels),
+      '',
+      `أضف الإداريين إلى <@&${staffRole.id}> حتى تصلهم التذاكر.`
+    ].join('\n')
+  });
+
+  console.log(
+    `Quick setup complete. guild=${guild.id} sections=${sections.length} ` +
+    `created roles=${created.roles.length} categories=${created.categories.length} channels=${created.channels.length}`
+  );
+}
+
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Ticket bot build: ${BUILD_ID}`);
@@ -1462,6 +1691,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.commandName === 'setup') {
         await interaction.showModal(createPanelModal());
+        return;
+      }
+
+      if (interaction.commandName === 'quick-setup') {
+        await runQuickSetup(interaction);
         return;
       }
 
