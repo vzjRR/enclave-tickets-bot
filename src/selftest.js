@@ -314,6 +314,19 @@ async function main() {
     process.exit(1);
   }
 
+  // This suite creates and destroys real channels and DMs the guild owner. On a
+  // deployment whose GUILD_ID is a live community, running it by reflex would be
+  // destructive, so the target has to be named a second time on purpose.
+  if (process.env.SELFTEST_ALLOW_GUILD !== GUILD_ID) {
+    console.error(
+      'Refusing to run: this suite deletes channels and DMs the guild owner.\n' +
+      `To confirm ${GUILD_ID} is a throwaway test server, re-run with:\n` +
+      `  SELFTEST_ALLOW_GUILD=${GUILD_ID} npm run selftest\n` +
+      'Never point it at a live community.'
+    );
+    process.exit(1);
+  }
+
   try {
     await run();
   } catch (error) {

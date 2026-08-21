@@ -37,7 +37,7 @@ Support Center                 visible to everyone
   permissions in code rather than trusting Discord's per-command defaults.
 - **Storage that survives a crash.** Atomic writes, a backup snapshot, and
   automatic recovery from a corrupt file.
-- **A real test suite.** 93 assertions driven against a live guild.
+- **A real test suite.** 68 assertions driven against a live guild.
 
 ## Requirements
 
@@ -241,13 +241,18 @@ alongside other bots on the same machine.
 npm run selftest
 ```
 
-93 assertions driven against the guild in `.env`: provisioning, every
+68 assertions driven against the guild in `.env`: provisioning, every
 permission rule, the full ticket lifecycle, adopting existing channels without
 clobbering their overwrites, category positioning, branding, and notification
 fallbacks. It cleans up after itself.
 
 It opens and closes real tickets and DMs the guild owner, so **point it at a
-test server, never at production.**
+test server, never at production.** As a guard against exactly that mistake it
+refuses to run unless the target guild is named twice:
+
+```bash
+SELFTEST_ALLOW_GUILD=<your test guild id> npm run selftest
+```
 
 ## Data and backups
 

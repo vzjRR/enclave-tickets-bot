@@ -32,7 +32,7 @@ const {
 
 const BRAND_NAME = 'Enclave Tickets';
 const BRAND_COLOR = 0x90773E;
-const BUILD_ID = 'enclave-tickets-dual-flow-2026-08-21-v2';
+const BUILD_ID = 'enclave-tickets-2026-08-21-v3';
 const TICKET_MARKER = 'Enclave Tickets | Ticket';
 
 // Every member-facing embed carries the same footer.
@@ -168,6 +168,14 @@ function sleep(ms) {
 
 function createTicketInstanceId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Drops keys left behind by an older layout so a config that has been through
+// an upgrade does not carry dead fields around forever.
+function stripLegacyConfigKeys(config) {
+  const next = { ...config };
+  for (const key of ['classicChannelId', 'classicMessageId']) delete next[key];
+  return next;
 }
 
 function ensureTicketInstance(config) {
@@ -2292,12 +2300,12 @@ async function provisionGuild(guild, options = {}) {
     guild, config, panelChannel, existing?.channelId, existing?.messageId, created
   );
 
-  const saved = setGuildConfig(guild.id, {
+  const saved = setGuildConfig(guild.id, stripLegacyConfigKeys({
     ...config,
     channelId: panelChannel.id,
     messageId: panelMessage?.id || null,
     updatedAt: new Date().toISOString()
-  });
+  }));
 
   console.log(
     `Provisioned ${guild.id}: sections=${sections.length} ` +
