@@ -2370,7 +2370,18 @@ async function publishFlowPanel(guild, config, flow, channel, prevChannelId, pre
     }
   }
 
-  return channel.send(payload);
+  try {
+    return await channel.send(payload);
+  } catch (error) {
+    const missing = missingChannelPermissions(channel);
+    created.warnings.push(
+      `I could not post the ticket panel in <#${channel.id}>` +
+      (missing.length ? ` -- I am missing **${missing.join(', ')}** there.` : '.') +
+      ` Fix that and run /quick-setup again; everything else is already set up.`
+    );
+    console.error(`Failed to publish the panel in ${channel.id}:`, error?.message || error);
+    return null;
+  }
 }
 
 // Interaction-free so the self-test can drive it directly.
@@ -2378,24 +2389,60 @@ async function publishFlowPanel(guild, config, flow, channel, prevChannelId, pre
 // its permissions are added to rather than replaced. Wiping the overwrites on a
 // channel a live community already uses would be destructive and is never worth
 // the tidiness.
+// What the bot must be able to do in a channel it was handed.
+const CHANNEL_ESSENTIALS = [
+  ['View Channel', PermissionFlagsBits.ViewChannel],
+  ['Send Messages', PermissionFlagsBits.SendMessages],
+  ['Embed Links', PermissionFlagsBits.EmbedLinks],
+  ['Read Message History', PermissionFlagsBits.ReadMessageHistory]
+];
+
+function missingChannelPermissions(channel) {
+  const me = channel.guild.members.me;
+  const perms = channel.permissionsFor(me);
+  return CHANNEL_ESSENTIALS.filter(([, flag]) => !perms?.has(flag)).map(([label]) => label);
+}
+
 async function reconcileProvidedChannel(channel, { staffRoleId, isLog }) {
   const warnings = [];
 
-  await channel.permissionOverwrites.edit(client.user.id, {
-    ViewChannel: true,
-    SendMessages: true,
-    EmbedLinks: true,
-    AttachFiles: true,
-    ReadMessageHistory: true,
-    ManageMessages: true
-  }, { reason: `${BRAND_NAME}: bot access` });
+  // Discord only lets you put a permission into an overwrite if you already
+  // hold it in that channel, so a channel that denies the bot something it
+  // needs cannot be repaired by the bot -- it has to be reported instead.
+  try {
+    await channel.permissionOverwrites.edit(client.user.id, {
+      ViewChannel: true,
+      SendMessages: true,
+      EmbedLinks: true,
+      AttachFiles: true,
+      ReadMessageHistory: true,
+      ManageMessages: true
+    }, { reason: `${BRAND_NAME}: bot access` });
+  } catch (error) {
+    const missing = missingChannelPermissions(channel);
+    warnings.push(
+      `I could not grant myself access in <#${channel.id}>` +
+      (missing.length ? ` because I do not have **${missing.join(', ')}** there.` : '.') +
+      ` Give my role those permissions on that channel, then run /quick-setup again.`
+    );
+    console.error(
+      `Could not self-grant in ${channel.id}: missing ${missing.join(", ") || "unknown"}`
+    );
+  }
 
   if (isLog) {
     if (staffRoleId) {
-      await channel.permissionOverwrites.edit(staffRoleId, {
-        ViewChannel: true,
-        ReadMessageHistory: true
-      }, { reason: `${BRAND_NAME}: staff read access to the ticket log` });
+      try {
+        await channel.permissionOverwrites.edit(staffRoleId, {
+          ViewChannel: true,
+          ReadMessageHistory: true
+        }, { reason: `${BRAND_NAME}: staff read access to the ticket log` });
+      } catch (error) {
+        warnings.push(
+          `I could not give <@&${staffRoleId}> read access to <#${channel.id}>. ` +
+          'Grant it manually so staff can see the archive.'
+        );
+      }
     }
 
     const everyone = channel.guild.roles.everyone;
@@ -2463,6 +2510,14 @@ async function provisionGuild(guild, options = {}) {
   const useClassic = flows.includes(FLOW_CLASSIC);
 
   if (!useModern && !useClassic) throw new Error('No ticket flows are enabled.');
+
+  for (const provided of [options.panelChannel, options.classicPanelChannel, options.logChannel]) {
+    if (!provided) continue;
+    const missing = missingChannelPermissions(provided);
+    if (missing.length) {
+      console.warn(`Bot is missing ${missing.join(", ")} in #${provided.name} (${provided.id}).`);
+    }
+  }
 
   const staffRole = await ensureStaffRole(guild, options.staffRole || null, created);
 
@@ -3399,6 +3454,8 @@ module.exports = {
   TRANSCRIPT_SEND_TO_OWNER,
   buildClosedTicketLink,
   getTicketControlMessageId,
+  missingBotPermissions,
+  missingChannelPermissions,
   missingOptionalBotPermissions,
   updatePinnedTicketControls,
   getGuildConfig,
