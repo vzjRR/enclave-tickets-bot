@@ -39,50 +39,10 @@ const TICKET_MARKER = 'Enclave Tickets | Ticket';
 const BRAND_TAGLINE = (process.env.BRAND_TAGLINE || 'Discord Manager').trim();
 const BRAND_FOOTER = `${BRAND_NAME} | ${BRAND_TAGLINE}`;
 
-// Two ticket lifecycles run side by side in the same guild so they can be
-// compared directly. A ticket records which one it belongs to in its channel
-// topic, and every lifecycle decision branches on that.
-//
-//   modern  - hidden categories, DM notifications, and closing archives the
-//             ticket to the log channel and deletes it.
-//   classic - the original AbuFaisal behaviour: staff-visible category, no
-//             DMs, and closing renames the channel to closed-N and keeps it
-//             in place with Transcript / Open / Delete controls.
-const FLOW_NEW = 'new';
-const FLOW_CLASSIC = 'classic';
-
-const FLOW_META = {
-  [FLOW_NEW]: {
-    key: FLOW_NEW,
-    label: 'Modern Flow',
-    emoji: '🎫',
-    color: 0x90773E,
-    panelChannel: 'create-ticket',
-    categoryPrefix: '',
-    notifiesByDm: true,
-    description:
-      'Pick the category that matches your issue. You will get a private channel and a direct message confirming it.\n\nClosed tickets are archived to the staff log and the channel is removed.'
-  },
-  [FLOW_CLASSIC]: {
-    key: FLOW_CLASSIC,
-    label: 'Classic Flow',
-    emoji: '🗂️',
-    color: 0x5865f2,
-    panelChannel: 'create-ticket-classic',
-    categoryPrefix: 'Classic',
-    notifiesByDm: false,
-    description:
-      'The original ticket lifecycle. Pick a category to open a private channel.\n\nClosed tickets are renamed to closed-<number> and kept in place, where staff can pull a transcript, reopen them, or delete them by hand.'
-  }
-};
-
-function flowMeta(flow) {
-  return FLOW_META[flow] || FLOW_META[FLOW_NEW];
-}
-
-function sectionFlow(section) {
-  return section?.flow === FLOW_CLASSIC ? FLOW_CLASSIC : FLOW_NEW;
-}
+// Presentation for the ticket panel.
+const PANEL_EMOJI = '🎫';
+const PANEL_DESCRIPTION =
+  'Pick the category that matches your issue. You will get a private channel and a direct message confirming it.\n\nClosed tickets are archived to the staff log and the channel is removed.';
 const REFRESH_INTERVAL_MINUTES = Math.max(
   5,
   Number.parseInt(process.env.TICKET_REFRESH_INTERVAL_MINUTES || '30', 10) || 30
@@ -109,9 +69,9 @@ const STAFF_DM_LIMIT = Math.max(
   Number.parseInt(process.env.STAFF_DM_LIMIT || '25', 10) || 25
 );
 
-// Whether the member who opened a ticket receives their own transcript: on
-// close for the modern flow, and on request for the classic one. The ticket
-// log stays staff-only either way, so this is how a member gets their record.
+// Whether the member who opened a ticket receives their own transcript when
+// it closes. The ticket log is staff-only and Discord cannot show a member
+// just their own entry in it, so this is how they get their record.
 const TRANSCRIPT_SEND_TO_OWNER = envFlag('TRANSCRIPT_SEND_TO_OWNER', true);
 
 const SETUP_SESSION_TTL_MS = 30 * 60_000;
@@ -133,13 +93,6 @@ const STAFF_ROLE_ID = (process.env.STAFF_ROLE_ID || '').trim();
 
 // New categories are placed directly above this one.
 const ANCHOR_CATEGORY_ID = (process.env.ANCHOR_CATEGORY_ID || '').trim();
-
-// Which ticket lifecycles to provision. Production usually wants just the
-// modern one; the demo server runs both so they can be compared.
-const ENABLED_FLOWS = (process.env.ENABLED_FLOWS || FLOW_NEW)
-  .split(',')
-  .map((flow) => flow.trim().toLowerCase())
-  .filter(Boolean);
 
 async function resolveConfiguredChannel(guild, id) {
   if (!id) return null;
@@ -396,17 +349,13 @@ function parseSectionEmoji(value) {
   };
 }
 
-function buildPanelEmbed(config, flow = FLOW_NEW) {
-  const meta = flowMeta(flow);
-
-  // Only the modern panel honours /setup customisation. The classic panel
-  // always renders from its own metadata so the two stay visually distinct.
-  const custom = flow === FLOW_NEW ? config : {};
+function buildPanelEmbed(config) {
+  const custom = config || {};
 
   const embed = new EmbedBuilder()
-    .setColor(custom.color || meta.color)
-    .setTitle(custom.title || `${meta.emoji} ${BRAND_NAME} — ${meta.label}`)
-    .setDescription(custom.description || meta.description)
+    .setColor(custom.color || BRAND_COLOR)
+    .setTitle(custom.title || `${PANEL_EMOJI} ${BRAND_NAME}`)
+    .setDescription(custom.description || PANEL_DESCRIPTION)
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
@@ -421,17 +370,16 @@ function buildPanelEmbed(config, flow = FLOW_NEW) {
   return embed;
 }
 
-function buildPanelMenu(config, flow = FLOW_NEW) {
-  const meta = flowMeta(flow);
-  const sections = (config.sections || []).filter((section) => sectionFlow(section) === flow);
+function buildPanelMenu(config) {
+  const sections = config.sections || [];
 
-  // Discord rejects a select menu with no options, so callers must skip a
-  // flow that has no sections rather than publish a broken panel.
+  // Discord rejects a select menu with no options, so callers must skip
+  // publishing rather than send a broken panel.
   if (!sections.length) return null;
 
   const menu = new StringSelectMenuBuilder()
-    .setCustomId(`ticket:panel:${flow}`)
-    .setPlaceholder(`Select a category — ${meta.label}`);
+    .setCustomId('ticket:panel')
+    .setPlaceholder('Select a Category');
 
   for (const section of sections.slice(0, 25)) {
     const sectionEmoji = parseSectionEmoji(section.emoji);
@@ -731,9 +679,9 @@ async function setTicketInfo(channel, info) {
   await withTimeout(channel.setTopic(nextTopic.slice(0, 1024)), `Update ticket info for ${channel.id}`);
 }
 
-function buildTicketControls(status = 'open', claimedBy = null, flow = FLOW_NEW) {
+function buildTicketControls(status = 'open', claimedBy = null) {
   const isClosed = status === 'closed';
-  const closeLabel = flow === FLOW_CLASSIC ? 'Close' : 'Close & Delete';
+  const closeLabel = 'Close & Delete';
 
   return [
     new ActionRowBuilder().addComponents(
@@ -783,7 +731,7 @@ async function updatePinnedTicketControls(channel, status, claimedBy = null) {
 
   await withTimeout(
     ticketMessage.edit({
-      components: buildTicketControls(status, claimedBy, getTicketFlow(channel))
+      components: buildTicketControls(status, claimedBy)
     }),
     `Update pinned ticket controls for ${channel.id}`
   );
@@ -1208,8 +1156,8 @@ async function publishPanel(interaction, session) {
 
   const setupConfig = ensureTicketInstance(session.config);
   const message = await channel.send({
-    embeds: [buildPanelEmbed(setupConfig, FLOW_NEW)],
-    components: [buildPanelMenu(setupConfig, FLOW_NEW)]
+    embeds: [buildPanelEmbed(setupConfig)],
+    components: [buildPanelMenu(setupConfig)]
   });
 
   const finalConfig = {
@@ -1228,35 +1176,20 @@ async function publishPanel(interaction, session) {
   });
 }
 
-// Refreshes every panel the guild has, one per flow, so a section added to
-// either list shows up without republishing by hand.
 async function updateSavedPanel(guild, config) {
-  const targets = [
-    { flow: FLOW_NEW, channelId: config.channelId, messageId: config.messageId },
-    { flow: FLOW_CLASSIC, channelId: config.classicChannelId, messageId: config.classicMessageId }
-  ].filter((target) => target.channelId && target.messageId);
+  if (!config.channelId || !config.messageId) return { ok: false, reason: 'missing_panel' };
 
-  if (!targets.length) return { ok: false, reason: 'missing_panel' };
+  const menu = buildPanelMenu(config);
+  if (!menu) return { ok: false, reason: 'no_sections' };
 
-  let updated = 0;
-  for (const target of targets) {
-    const menu = buildPanelMenu(config, target.flow);
-    if (!menu) continue;
+  const channel = await guild.channels.fetch(config.channelId).catch(() => null);
+  if (!channel?.isTextBased()) return { ok: false, reason: 'missing_channel' };
 
-    const channel = await guild.channels.fetch(target.channelId).catch(() => null);
-    if (!channel?.isTextBased()) continue;
+  const message = await channel.messages.fetch(config.messageId).catch(() => null);
+  if (!message) return { ok: false, reason: 'missing_message' };
 
-    const message = await channel.messages.fetch(target.messageId).catch(() => null);
-    if (!message) continue;
-
-    await message.edit({
-      embeds: [buildPanelEmbed(config, target.flow)],
-      components: [menu]
-    });
-    updated += 1;
-  }
-
-  return updated ? { ok: true, updated } : { ok: false, reason: 'missing_message' };
+  await message.edit({ embeds: [buildPanelEmbed(config)], components: [menu] });
+  return { ok: true, channel, message };
 }
 
 async function resendSavedPanel(interaction) {
@@ -1280,8 +1213,8 @@ async function resendSavedPanel(interaction) {
 
   const panelConfig = ensureTicketInstance(config);
   const message = await interaction.channel.send({
-    embeds: [buildPanelEmbed(panelConfig, FLOW_NEW)],
-    components: [buildPanelMenu(panelConfig, FLOW_NEW)]
+    embeds: [buildPanelEmbed(panelConfig)],
+    components: [buildPanelMenu(panelConfig)]
   });
 
   setGuildConfig(interaction.guildId, {
@@ -1297,7 +1230,7 @@ async function resendSavedPanel(interaction) {
   });
 }
 
-async function findExistingMemberTicket(guild, userId, config, flow = null) {
+async function findExistingMemberTicket(guild, userId, config) {
   // The Guilds intent keeps the channel cache current through gateway events,
   // so avoid a REST sweep of every channel on each panel click.
   const channels = guild.channels.cache.size ? guild.channels.cache : await guild.channels.fetch();
@@ -1321,176 +1254,10 @@ async function findExistingMemberTicket(guild, userId, config, flow = null) {
       return false;
     }
 
-    // Scoped per flow so a member testing the modern panel is not blocked
-    // from also opening a classic ticket.
-    if (flow && getTicketFlow(channel) !== flow) {
-      return false;
-    }
-
     console.log(`Existing open ticket found for ${userId}: ${channel.id} #${channel.name}`);
 
     return true;
   }) || null;
-}
-
-// ---------------------------------------------------------------------------
-// Classic flow lifecycle
-//
-// Restored verbatim from the original AbuFaisal implementation so the two
-// flows can be compared on equal terms. Closing renames the channel to
-// closed-<number> and revokes the opener's access; the channel itself is the
-// archive. This is what makes the rename retry queue load-bearing: Discord
-// rate-limits channel renames to roughly two per ten minutes per channel.
-// ---------------------------------------------------------------------------
-
-function buildClosedTicketEmbeds(closedById) {
-  return [
-    new EmbedBuilder()
-      .setColor(0xffff00)
-      .setDescription(`Ticket Closed by <@${closedById}>`),
-    new EmbedBuilder()
-      .setColor(0x2f3136)
-      .setDescription('```Support team ticket controls```')
-  ];
-}
-
-function buildClosedTicketSummaryEmbed(closedById) {
-  return new EmbedBuilder()
-    .setColor(0xffff00)
-    .setDescription(`Ticket Closed by <@${closedById}>`);
-}
-
-function buildOpenedTicketEmbed(openedById) {
-  return new EmbedBuilder()
-    .setColor(0x2ecc71)
-    .setDescription(`Ticket Opened by <@${openedById}>`);
-}
-
-function buildClosedTicketControls(disabled = false) {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('ticket:transcript')
-        .setLabel('Transcript')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(disabled),
-      new ButtonBuilder()
-        .setCustomId('ticket:reopen')
-        .setLabel('Open')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(disabled),
-      new ButtonBuilder()
-        .setCustomId('ticket:delete')
-        .setLabel('Delete')
-        .setStyle(ButtonStyle.Danger)
-        .setDisabled(disabled)
-    )
-  ];
-}
-
-function getOpenTicketName(channel) {
-  const ticketNumber = getTicketNumber(channel);
-  return ticketNumber ? `ticket-${ticketNumber}` : channel.name.replace(/^closed-/, '');
-}
-
-function getClosedTicketName(channel) {
-  const ticketNumber = getTicketNumber(channel);
-  if (ticketNumber) return `closed-${ticketNumber}`;
-
-  const openName = getOpenTicketName(channel);
-  return openName.startsWith('closed-') ? openName : `closed-${openName}`.slice(0, 100);
-}
-
-function getReopenTicketName(channel) {
-  return getOpenTicketName(channel);
-}
-
-async function closeTicketChannel(channel) {
-  const ownerId = getTicketOwnerId(channel);
-  const nextName = getClosedTicketName(channel);
-
-  setTicketClosedState(channel.guild.id, channel.id, true);
-  scheduleTicketRename(channel, nextName, 'close');
-
-  if (ownerId) {
-    try {
-      await editPermissionOverwrite(
-        channel,
-        ownerId,
-        {
-          ViewChannel: false,
-          SendMessages: false,
-          AttachFiles: false,
-          ReadMessageHistory: false
-        },
-        `Close ticket owner permissions for ${channel.id}`
-      );
-    } catch (error) {
-      console.error(`Failed to close ticket owner permissions for ${channel.id}:`, error);
-    }
-  }
-
-  console.log(`Ticket channel closed: ${channel.id} #${channel.name}; rename scheduled to #${nextName}`);
-  return { ok: true, oldName: channel.name, nextName, expectedName: nextName, channel, renameOk: null };
-}
-
-async function reopenTicketChannel(channel) {
-  const ownerId = getTicketOwnerId(channel);
-  const nextName = getReopenTicketName(channel);
-
-  setTicketClosedState(channel.guild.id, channel.id, false);
-
-  if (ownerId) {
-    try {
-      await editPermissionOverwrite(
-        channel,
-        ownerId,
-        {
-          ViewChannel: true,
-          SendMessages: true,
-          AttachFiles: true,
-          ReadMessageHistory: true
-        },
-        `Open ticket owner permissions for ${channel.id}`
-      );
-    } catch (error) {
-      console.error(`Failed to open ticket owner permissions for ${channel.id}:`, error);
-    }
-  }
-
-  scheduleTicketRename(channel, nextName, 'reopen');
-
-  return { ok: true, channel, oldName: channel.name, nextName, expectedName: nextName, renameOk: null };
-}
-
-async function sendTicketTranscript(channel) {
-  const ownerId = getTicketOwnerId(channel);
-  const claimedBy = getTicketClaimedBy(channel);
-  const messages = await fetchTranscriptMessages(channel);
-  const transcript = buildTranscriptText(channel, messages);
-  const fileName = `${channel.name}-transcript.txt`;
-  const recipients = [...new Set(
-    (TRANSCRIPT_SEND_TO_OWNER ? [ownerId, claimedBy] : [claimedBy]).filter(Boolean)
-  )];
-  const delivered = [];
-  const failed = [];
-
-  for (const userId of recipients) {
-    try {
-      const user = await client.users.fetch(userId);
-      const attachment = new AttachmentBuilder(Buffer.from(transcript, 'utf8'), { name: fileName });
-      await user.send({
-        content: `Transcript for ${channel.name}`,
-        files: [attachment]
-      });
-      delivered.push(`<@${userId}>`);
-    } catch (error) {
-      console.error(`Failed to DM transcript to ${userId}:`, error);
-      failed.push(`<@${userId}>`);
-    }
-  }
-
-  return { delivered, failed, totalMessages: messages.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,11 +1280,6 @@ async function dmUser(userId, payload, label) {
     console.error(`Failed to DM ${label} to ${userId}:`, error?.message || error);
     return false;
   }
-}
-
-function getTicketFlow(channel) {
-  const match = channel?.topic?.match(/flow=([a-z]+)/);
-  return match?.[1] === FLOW_CLASSIC ? FLOW_CLASSIC : FLOW_NEW;
 }
 
 function getTicketSection(channel) {
@@ -1774,7 +1536,7 @@ async function closeAndArchiveTicket(channel, closedById) {
 }
 
 // Creates the ticket channel, announces it, pins the controls and (on the
-// modern flow) notifies the member. Interaction-free by design: openTicket
+// notifies the member. Interaction-free by design: openTicket
 // wraps it for real users, and the self-test calls it directly.
 // Staff are always mentioned in the ticket channel. DMing them as well needs
 // the role's membership, and reading that needs the privileged Server Members
@@ -1829,7 +1591,7 @@ async function notifyStaffOfNewTicket({ guild, section, channel, user, reason, t
   if (!recipients.length) return { attempted: 0, delivered: 0, skipped: false };
 
   const embed = new EmbedBuilder()
-    .setColor(flowMeta(sectionFlow(section)).color)
+    .setColor(BRAND_COLOR)
     .setAuthor({
       name: guild.name,
       iconURL: guild.iconURL({ size: 128 }) || client.user?.displayAvatarURL({ size: 128 })
@@ -1882,8 +1644,6 @@ async function createTicket({ guild, user, section, reason, config }) {
 
   if (!ticketNumber) return null;
 
-  const flow = sectionFlow(section);
-  const meta = flowMeta(flow);
   const channelName = `ticket-${ticketNumber}`;
   const permissionOverwrites = [
     { id: everyoneId, deny: [PermissionFlagsBits.ViewChannel] },
@@ -1924,22 +1684,21 @@ async function createTicket({ guild, user, section, reason, config }) {
     name: channelName,
     type: ChannelType.GuildText,
     parent: section.categoryId,
-    topic: `${TICKET_MARKER} | flow=${flow} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | status=open`,
+    topic: `${TICKET_MARKER} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | status=open`,
     permissionOverwrites
   });
 
   const staffMentions = section.roleIds.map((roleId) => `<@&${roleId}>`).join(' ');
   const openedAt = Math.floor(Date.now() / 1000);
   const embed = new EmbedBuilder()
-    .setColor(meta.color)
+    .setColor(BRAND_COLOR)
     .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${section.name}`)
     .setDescription(reason)
     .addFields(
       { name: 'Opened by', value: `<@${user.id}>`, inline: true },
       { name: 'Category', value: section.name, inline: true },
       { name: 'Ticket number', value: `#${ticketNumber}`, inline: true },
-      { name: 'Opened at', value: `<t:${openedAt}:f>`, inline: true },
-      { name: 'Flow', value: `${meta.emoji} ${meta.label}`, inline: true }
+      { name: 'Opened at', value: `<t:${openedAt}:f>`, inline: true }
     )
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
@@ -1949,7 +1708,7 @@ async function createTicket({ guild, user, section, reason, config }) {
   const pinned = await channel.send({
     content: `${staffMentions} <@${user.id}>`.trim(),
     embeds: [embed],
-    components: buildTicketControls('open', null, flow),
+    components: buildTicketControls(),
     // Deliberately no @everyone. Ticket creation is member-triggered, so pinging
     // the whole server on each one is a mass-notification abuse vector; the
     // responsible staff roles and the owner are the only people who need it.
@@ -1977,9 +1736,7 @@ async function createTicket({ guild, user, section, reason, config }) {
     console.error('Failed to pin ticket message:', error?.message || error);
   });
 
-  // The classic flow never messaged members; keeping that difference is the
-  // point of running both.
-  const notified = !meta.notifiesByDm || await dmUser(user.id, {
+  const notified = await dmUser(user.id, {
     embeds: [
       new EmbedBuilder()
         .setColor(config.color || BRAND_COLOR)
@@ -2004,7 +1761,7 @@ async function createTicket({ guild, user, section, reason, config }) {
     }).catch(() => {});
   }
 
-  return { channel, ticketNumber, flow, notified };
+  return { channel, ticketNumber, notified };
 }
 
 async function openTicket(interaction, sectionId, reason) {
@@ -2033,12 +1790,12 @@ async function openTicket(interaction, sectionId, reason) {
   }
 
   const existingTicket = await findExistingMemberTicket(
-    interaction.guild, interaction.user.id, config, sectionFlow(section)
+    interaction.guild, interaction.user.id, config
   );
 
   if (existingTicket) {
     await sendInteractionResult(interaction, {
-      content: `You already have an open ${flowMeta(sectionFlow(section)).label} ticket: <#${existingTicket.id}>`,
+      content: `You already have an open ticket: <#${existingTicket.id}>`,
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2088,7 +1845,6 @@ const DEFAULT_SECTIONS = [
 const STAFF_ROLE_NAME = 'Ticket Staff';
 const TICKET_CATEGORY_NAME = '🎫 TICKETS';
 const SUPPORT_CATEGORY_NAME = 'Support Center';
-const CLASSIC_CATEGORY_NAME = '🗂️ Classic Tickets';
 const PANEL_CHANNEL_NAME = 'create-ticket';
 const LOG_CHANNEL_NAME = 'tickets-log';
 
@@ -2209,186 +1965,6 @@ async function ensureTicketCategory(guild, name, created) {
   return category;
 }
 
-// The classic flow keeps every section in one staff-visible category, which is
-// how the original worked: closed tickets are renamed rather than removed, so
-// they accumulate here as closed-<number> and staff browse them in place.
-async function ensureClassicCategory(guild, staffRoleId, created) {
-  const overwrites = [
-    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    {
-      id: staffRoleId,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-        PermissionFlagsBits.ManageMessages
-      ]
-    },
-    {
-      id: client.user.id,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ManageChannels,
-        PermissionFlagsBits.ManageMessages,
-        PermissionFlagsBits.ReadMessageHistory
-      ]
-    }
-  ];
-
-  const existing = guild.channels.cache.find(
-    (channel) => channel?.type === ChannelType.GuildCategory && channel.name === CLASSIC_CATEGORY_NAME
-  );
-
-  if (existing) {
-    await existing.permissionOverwrites.set(overwrites, `${BRAND_NAME}: classic category access`);
-    return existing;
-  }
-
-  const category = await guild.channels.create({
-    name: CLASSIC_CATEGORY_NAME,
-    type: ChannelType.GuildCategory,
-    permissionOverwrites: overwrites,
-    reason: `${BRAND_NAME}: classic ticket category`
-  });
-
-  created.categories.push(CLASSIC_CATEGORY_NAME);
-  return category;
-}
-
-async function ensurePanelChannel(guild, providedChannel, flow, parentId, created) {
-  if (providedChannel) return providedChannel;
-
-  const meta = flowMeta(flow);
-  const existing = guild.channels.cache.find(
-    (channel) => channel?.type === ChannelType.GuildText && channel.name === meta.panelChannel
-  );
-  if (existing) return existing;
-
-  // Everyone can see the panel and use the menu, but not post in the channel.
-  const channel = await guild.channels.create({
-    name: meta.panelChannel,
-    type: ChannelType.GuildText,
-    parent: parentId,
-    topic: `${BRAND_NAME} | ${meta.label} — open a ticket from the menu below`,
-    permissionOverwrites: [
-      {
-        id: guild.roles.everyone.id,
-        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
-        deny: [PermissionFlagsBits.SendMessages]
-      },
-      {
-        id: client.user.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.EmbedLinks,
-          PermissionFlagsBits.ManageMessages,
-          PermissionFlagsBits.ReadMessageHistory
-        ]
-      }
-    ],
-    reason: `${BRAND_NAME}: ${meta.label} panel channel`
-  });
-
-  created.channels.push(channel.name);
-  return channel;
-}
-
-// Closed modern tickets are deleted, so this is their only durable record.
-// Staff can read it; nobody but the bot can write to it.
-async function ensureLogChannel(guild, parentId, staffRoleId, created, providedChannel = null) {
-  if (providedChannel) return providedChannel;
-
-  const overwrites = [
-    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    {
-      id: staffRoleId,
-      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
-      deny: [PermissionFlagsBits.SendMessages]
-    },
-    {
-      id: client.user.id,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.EmbedLinks,
-        PermissionFlagsBits.AttachFiles,
-        PermissionFlagsBits.ReadMessageHistory
-      ]
-    }
-  ];
-
-  const existing = guild.channels.cache.find(
-    (channel) => channel?.type === ChannelType.GuildText && channel.name === LOG_CHANNEL_NAME
-  );
-
-  if (existing) {
-    await existing.permissionOverwrites.set(overwrites, `${BRAND_NAME}: log channel access`);
-    return existing;
-  }
-
-  const channel = await guild.channels.create({
-    name: LOG_CHANNEL_NAME,
-    type: ChannelType.GuildText,
-    parent: parentId,
-    topic: `${BRAND_NAME} | Archive of every closed ticket`,
-    permissionOverwrites: overwrites,
-    reason: `${BRAND_NAME}: log channel`
-  });
-
-  created.channels.push(channel.name);
-  return channel;
-}
-
-// Publishes or updates one flow's panel. Editing in place keeps a single panel
-// per flow; if the panel moved channels the previous message is deleted, since
-// it still carries a working menu.
-async function publishFlowPanel(guild, config, flow, channel, prevChannelId, prevMessageId, created) {
-  const menu = buildPanelMenu(config, flow);
-  if (!menu) return null;
-
-  const payload = {
-    embeds: [buildPanelEmbed(config, flow)],
-    components: [menu]
-  };
-
-  if (prevMessageId && prevChannelId === channel.id) {
-    const existing = await channel.messages.fetch(prevMessageId).catch(() => null);
-    if (existing) return existing.edit(payload);
-  } else if (prevMessageId && prevChannelId) {
-    const oldChannel = await guild.channels.fetch(prevChannelId).catch(() => null);
-    const oldMessage = oldChannel?.isTextBased()
-      ? await oldChannel.messages.fetch(prevMessageId).catch(() => null)
-      : null;
-
-    if (oldMessage) {
-      await oldMessage.delete().catch((error) => {
-        console.error('Failed to remove a previous ticket panel:', error?.message || error);
-      });
-      created.removed.push(`old ${flowMeta(flow).label} panel in #${oldChannel.name}`);
-    }
-  }
-
-  try {
-    return await channel.send(payload);
-  } catch (error) {
-    const missing = missingChannelPermissions(channel);
-    created.warnings.push(
-      `I could not post the ticket panel in <#${channel.id}>` +
-      (missing.length ? ` -- I am missing **${missing.join(', ')}** there.` : '.') +
-      ` Fix that and run /quick-setup again; everything else is already set up.`
-    );
-    console.error(`Failed to publish the panel in ${channel.id}:`, error?.message || error);
-    return null;
-  }
-}
-
-// Interaction-free so the self-test can drive it directly.
-// An existing channel handed to us belongs to the server, not to this bot, so
-// its permissions are added to rather than replaced. Wiping the overwrites on a
-// channel a live community already uses would be destructive and is never worth
-// the tidiness.
 // What the bot must be able to do in a channel it was handed.
 const CHANNEL_ESSENTIALS = [
   ['View Channel', PermissionFlagsBits.ViewChannel],
@@ -2403,6 +1979,10 @@ function missingChannelPermissions(channel) {
   return CHANNEL_ESSENTIALS.filter(([, flag]) => !perms?.has(flag)).map(([label]) => label);
 }
 
+// An existing channel handed to us belongs to the server, not to this bot, so
+// its permissions are added to rather than replaced. Wiping the overwrites on a
+// channel a live community already uses would be destructive and is never worth
+// the tidiness.
 async function reconcileProvidedChannel(channel, { staffRoleId, isLog }) {
   const warnings = [];
 
@@ -2426,7 +2006,7 @@ async function reconcileProvidedChannel(channel, { staffRoleId, isLog }) {
       ` Give my role those permissions on that channel, then run /quick-setup again.`
     );
     console.error(
-      `Could not self-grant in ${channel.id}: missing ${missing.join(", ") || "unknown"}`
+      `Could not self-grant in ${channel.id}: missing ${missing.join(', ') || 'unknown'}`
     );
   }
 
@@ -2501,31 +2081,146 @@ async function positionCategoriesAbove(guild, categoryIds, anchorId) {
   }
 }
 
-// Interaction-free so the self-test can drive it directly.
+async function ensurePanelChannel(guild, providedChannel, parentId, created) {
+  if (providedChannel) return providedChannel;
+
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildText && channel.name === PANEL_CHANNEL_NAME
+  );
+  if (existing) return existing;
+
+  // Everyone can see the panel and use the menu, but not post in the channel.
+  const channel = await guild.channels.create({
+    name: PANEL_CHANNEL_NAME,
+    type: ChannelType.GuildText,
+    parent: parentId,
+    topic: `${BRAND_NAME} | open a ticket from the menu below`,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+        deny: [PermissionFlagsBits.SendMessages]
+      },
+      {
+        id: client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.EmbedLinks,
+          PermissionFlagsBits.ManageMessages,
+          PermissionFlagsBits.ReadMessageHistory
+        ]
+      }
+    ],
+    reason: `${BRAND_NAME}: panel channel`
+  });
+
+  created.channels.push(channel.name);
+  return channel;
+}
+
+// Closed tickets are deleted, so this is their only durable record. Staff can
+// read it; nobody but the bot can write to it.
+async function ensureLogChannel(guild, parentId, staffRoleId, created, providedChannel = null) {
+  if (providedChannel) return providedChannel;
+
+  const overwrites = [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    {
+      id: staffRoleId,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: [PermissionFlagsBits.SendMessages]
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.ReadMessageHistory
+      ]
+    }
+  ];
+
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildText && channel.name === LOG_CHANNEL_NAME
+  );
+
+  if (existing) {
+    await existing.permissionOverwrites.set(overwrites, `${BRAND_NAME}: log channel access`);
+    return existing;
+  }
+
+  const channel = await guild.channels.create({
+    name: LOG_CHANNEL_NAME,
+    type: ChannelType.GuildText,
+    parent: parentId,
+    topic: `${BRAND_NAME} | archive of every closed ticket`,
+    permissionOverwrites: overwrites,
+    reason: `${BRAND_NAME}: log channel`
+  });
+
+  created.channels.push(channel.name);
+  return channel;
+}
+
+// Publishes or updates the panel. Editing in place keeps a single panel; if the
+// panel moved channels the previous message is deleted, since it still carries
+// a working menu.
+async function publishPanelMessage(guild, config, channel, prevChannelId, prevMessageId, created) {
+  const menu = buildPanelMenu(config);
+  if (!menu) return null;
+
+  const payload = { embeds: [buildPanelEmbed(config)], components: [menu] };
+
+  if (prevMessageId && prevChannelId === channel.id) {
+    const existing = await channel.messages.fetch(prevMessageId).catch(() => null);
+    if (existing) return existing.edit(payload);
+  } else if (prevMessageId && prevChannelId) {
+    const oldChannel = await guild.channels.fetch(prevChannelId).catch(() => null);
+    const oldMessage = oldChannel?.isTextBased()
+      ? await oldChannel.messages.fetch(prevMessageId).catch(() => null)
+      : null;
+
+    if (oldMessage) {
+      await oldMessage.delete().catch((error) => {
+        console.error('Failed to remove the previous ticket panel:', error?.message || error);
+      });
+      created.removed.push(`old panel in #${oldChannel.name}`);
+    }
+  }
+
+  try {
+    return await channel.send(payload);
+  } catch (error) {
+    const missing = missingChannelPermissions(channel);
+    created.warnings.push(
+      `I could not post the ticket panel in <#${channel.id}>` +
+      (missing.length ? ` -- I am missing **${missing.join(', ')}** there.` : '.') +
+      ` Fix that and run /quick-setup again; everything else is already set up.`
+    );
+    console.error(`Failed to publish the panel in ${channel.id}:`, error?.message || error);
+    return null;
+  }
+}
+
+// Interaction-free so it can be driven directly.
 async function provisionGuild(guild, options = {}) {
   const created = { roles: [], categories: [], channels: [], removed: [], warnings: [] };
-  const flows = (options.flows?.length ? options.flows : ENABLED_FLOWS)
-    .filter((flow) => flow === FLOW_NEW || flow === FLOW_CLASSIC);
-  const useModern = flows.includes(FLOW_NEW);
-  const useClassic = flows.includes(FLOW_CLASSIC);
 
-  if (!useModern && !useClassic) throw new Error('No ticket flows are enabled.');
-
-  for (const provided of [options.panelChannel, options.classicPanelChannel, options.logChannel]) {
+  for (const provided of [options.panelChannel, options.logChannel]) {
     if (!provided) continue;
     const missing = missingChannelPermissions(provided);
     if (missing.length) {
-      console.warn(`Bot is missing ${missing.join(", ")} in #${provided.name} (${provided.id}).`);
+      console.warn(`Bot is missing ${missing.join(', ')} in #${provided.name} (${provided.id}).`);
     }
   }
 
   const staffRole = await ensureStaffRole(guild, options.staffRole || null, created);
 
   // Only needed as a parent for channels this run actually creates.
-  const needsSupportCategory =
-    (useModern && !options.panelChannel) ||
-    (useClassic && !options.classicPanelChannel) ||
-    !options.logChannel;
+  const needsSupportCategory = !options.panelChannel || !options.logChannel;
   const supportCategory = needsSupportCategory
     ? await ensureSupportCategory(guild, created)
     : null;
@@ -2534,57 +2229,35 @@ async function provisionGuild(guild, options = {}) {
   const ticketCategoryIds = [];
   const stamp = Date.now();
 
-  if (useModern) {
-    const sharedModern = options.singleCategory
-      ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, created)
-      : null;
+  const sharedCategory = options.singleCategory
+    ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, created)
+    : null;
 
-    for (const [index, template] of DEFAULT_SECTIONS.entries()) {
-      const category = sharedModern
-        || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, created);
+  for (const [index, template] of DEFAULT_SECTIONS.entries()) {
+    const category = sharedCategory
+      || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, created);
 
-      if (!ticketCategoryIds.includes(category.id)) ticketCategoryIds.push(category.id);
+    if (!ticketCategoryIds.includes(category.id)) ticketCategoryIds.push(category.id);
 
-      sections.push({
-        id: `n${stamp}${index}`,
-        name: template.name,
-        emoji: template.emoji,
-        categoryId: category.id,
-        roleIds: [staffRole.id],
-        flow: FLOW_NEW
-      });
-    }
-  }
-
-  if (useClassic) {
-    const classicCategory = await ensureClassicCategory(guild, staffRole.id, created);
-    if (!ticketCategoryIds.includes(classicCategory.id)) ticketCategoryIds.push(classicCategory.id);
-
-    for (const [index, template] of DEFAULT_SECTIONS.entries()) {
-      sections.push({
-        id: `c${stamp}${index}`,
-        name: template.name,
-        emoji: template.emoji,
-        categoryId: classicCategory.id,
-        roleIds: [staffRole.id],
-        flow: FLOW_CLASSIC
-      });
-    }
+    sections.push({
+      id: `t${stamp}${index}`,
+      name: template.name,
+      emoji: template.emoji,
+      categoryId: category.id,
+      roleIds: [staffRole.id]
+    });
   }
 
   const supportCategoryId = supportCategory?.id ?? null;
-  const panelChannel = useModern
-    ? await ensurePanelChannel(guild, options.panelChannel || null, FLOW_NEW, supportCategoryId, created)
-    : null;
-  const classicPanelChannel = useClassic
-    ? await ensurePanelChannel(guild, options.classicPanelChannel || null, FLOW_CLASSIC, supportCategoryId, created)
-    : null;
+  const panelChannel = await ensurePanelChannel(
+    guild, options.panelChannel || null, supportCategoryId, created
+  );
   const logChannel = await ensureLogChannel(
     guild, supportCategoryId, staffRole.id, created, options.logChannel || null
   );
 
   // Existing channels get additive permission fixes only.
-  for (const [channel, isLog] of [[options.panelChannel, false], [options.classicPanelChannel, false], [options.logChannel, true]]) {
+  for (const [channel, isLog] of [[options.panelChannel, false], [options.logChannel, true]]) {
     if (!channel) continue;
     created.warnings.push(...await reconcileProvidedChannel(channel, { staffRoleId: staffRole.id, isLog }));
   }
@@ -2615,33 +2288,27 @@ async function provisionGuild(guild, options = {}) {
     ticketCounter: Number(existing?.ticketCounter) || 2000
   });
 
-  const modernPanel = panelChannel
-    ? await publishFlowPanel(guild, config, FLOW_NEW, panelChannel, existing?.channelId, existing?.messageId, created)
-    : null;
-  const classicPanel = classicPanelChannel
-    ? await publishFlowPanel(guild, config, FLOW_CLASSIC, classicPanelChannel,
-        existing?.classicChannelId, existing?.classicMessageId, created)
-    : null;
+  const panelMessage = await publishPanelMessage(
+    guild, config, panelChannel, existing?.channelId, existing?.messageId, created
+  );
 
   const saved = setGuildConfig(guild.id, {
     ...config,
-    channelId: panelChannel?.id || null,
-    messageId: modernPanel?.id || null,
-    classicChannelId: classicPanelChannel?.id || null,
-    classicMessageId: classicPanel?.id || null,
+    channelId: panelChannel.id,
+    messageId: panelMessage?.id || null,
     updatedAt: new Date().toISOString()
   });
 
   console.log(
-    `Provisioned ${guild.id}: flows=${flows.join('+')} sections=${sections.length} ` +
+    `Provisioned ${guild.id}: sections=${sections.length} ` +
     `roles=${created.roles.length} categories=${created.categories.length} ` +
     `channels=${created.channels.length} removed=${created.removed.length} ` +
     `positioned=${positioned?.ok ? 'yes' : 'no'}`
   );
 
   return {
-    created, flows, staffRole, supportCategory, positioned,
-    panelChannel, classicPanelChannel, logChannel, sections, config: saved
+    created, staffRole, supportCategory, positioned,
+    panelChannel, logChannel, sections, config: saved
   };
 }
 
@@ -2672,25 +2339,17 @@ async function runQuickSetup(interaction) {
 
   const { created } = result;
   const line = (label, items) => (items.length ? `${label}: ${items.join(', ')}` : `${label}: none`);
-  const flowLines = [];
-
-  if (result.panelChannel) {
-    flowLines.push(`${flowMeta(FLOW_NEW).emoji} **${flowMeta(FLOW_NEW).label}**: <#${result.panelChannel.id}>`);
-  }
-  if (result.classicPanelChannel) {
-    flowLines.push(`${flowMeta(FLOW_CLASSIC).emoji} **${flowMeta(FLOW_CLASSIC).label}**: <#${result.classicPanelChannel.id}>`);
-  }
 
   await interaction.editReply({
     content: [
       `**${BRAND_NAME}** is ready in **${guild.name}**.`,
       '',
-      ...flowLines,
+      `Panel: <#${result.panelChannel.id}>`,
       `Ticket log: <#${result.logChannel.id}>`,
       `Staff role: <@&${result.staffRole.id}>`,
-      `Sections: ${result.sections.length}`,
+      `Categories: ${result.sections.length}`,
       result.positioned?.ok
-        ? `Categories placed above **${result.positioned.anchor}**.`
+        ? `Placed above **${result.positioned.anchor}**.`
         : '',
       '',
       line('Roles created', created.roles),
@@ -2826,23 +2485,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.commandName === 'ticket-close') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const channel = await fetchFreshTicketChannel(interaction);
-
-        if (getTicketFlow(channel) === FLOW_CLASSIC) {
-          const closed = await closeTicketChannel(channel);
-          await tryUpdatePinnedTicketControls(channel, 'closed', getTicketClaimedBy(channel));
-          await channel
-            .send({
-              embeds: buildClosedTicketEmbeds(interaction.user.id),
-              components: buildClosedTicketControls()
-            })
-            .catch(() => {});
-
-          await interaction.editReply({
-            content: `Classic ticket closed. Rename queued to \`${closed.nextName}\`. ` +
-              'The channel stays in place; use Open, Transcript or Delete on it.'
-          });
-          return;
-        }
 
         const result = await closeAndArchiveTicket(channel, interaction.user.id);
 
@@ -3018,7 +2660,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const existingTicket = await findExistingMemberTicket(
-        interaction.guild, interaction.user.id, config, sectionFlow(selectedSection)
+        interaction.guild, interaction.user.id, config
       );
       if (existingTicket) {
         await interaction.reply({
@@ -3096,17 +2738,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           });
 
-          const claimFlow = getTicketFlow(interaction.channel);
-
           await interaction.message.edit({
             embeds: [embed],
-            components: buildTicketControls('open', interaction.user.id, claimFlow)
+            components: buildTicketControls('open', interaction.user.id)
           });
 
           const claimTicketNumber = getTicketNumber(interaction.channel) || 'unknown';
-          // Only the modern flow notifies the member; the classic one never did.
-          if (flowMeta(claimFlow).notifiesByDm) {
-            await dmUser(getTicketOwnerId(interaction.channel), {
+          await dmUser(getTicketOwnerId(interaction.channel), {
             embeds: [
               new EmbedBuilder()
                 .setColor(0x2ecc71)
@@ -3119,8 +2757,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 .setFooter({ text: BRAND_FOOTER })
                 .setTimestamp()
             ]
-            }, 'ticket claimed notice');
-          }
+          }, 'ticket claimed notice');
 
           await interaction.channel.send({
             embeds: [
@@ -3137,37 +2774,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (interaction.customId === 'ticket:close') {
           await interaction.deferUpdate();
           const channel = await fetchFreshTicketChannel(interaction);
-          const closeFlow = getTicketFlow(channel);
-
           await interaction.message
             .edit({ components: buildTicketBusyControls('Closing...') })
             .catch(() => {});
-
-          if (closeFlow === FLOW_CLASSIC) {
-            // Original behaviour: rename to closed-<number>, revoke the
-            // opener, and leave the channel standing as its own archive.
-            const closed = await closeTicketChannel(channel);
-            const classicClaimedBy = getTicketClaimedBy(channel) || claimedBy;
-
-            await interaction.message
-              .edit({
-                components: buildTicketControls('closed', classicClaimedBy, FLOW_CLASSIC)
-              })
-              .catch(() => {});
-
-            await channel
-              .send({
-                embeds: buildClosedTicketEmbeds(interaction.user.id),
-                components: buildClosedTicketControls()
-              })
-              .catch(() => {});
-
-            console.log(
-              `Classic ticket closed: ${channel.id} by ${interaction.user.id}; ` +
-              `rename queued to #${closed.nextName}`
-            );
-            return;
-          }
 
           const result = await closeAndArchiveTicket(channel, interaction.user.id);
 
@@ -3187,67 +2796,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
               ]
             })
             .catch(() => {});
-          return;
-        }
-
-        // The three controls below only ever appear on a closed classic
-        // ticket. A modern ticket is deleted on close, so it has no way to
-        // reach them.
-        if (interaction.customId === 'ticket:reopen') {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          const channel = await fetchFreshTicketChannel(interaction);
-
-          const reopened = await reopenTicketChannel(channel);
-          const reopenedChannel = reopened.channel || channel;
-          const reopenClaimedBy = getTicketClaimedBy(reopenedChannel) || claimedBy;
-
-          tryUpdatePinnedTicketControls(reopenedChannel, 'open', reopenClaimedBy);
-
-          await interaction.message
-            .edit({
-              embeds: [buildClosedTicketSummaryEmbed(interaction.user.id)],
-              components: []
-            })
-            .catch(() => {});
-
-          await reopenedChannel
-            .send({ embeds: [buildOpenedTicketEmbed(interaction.user.id)] })
-            .catch(() => {});
-
-          await interaction.editReply({
-            content: `Ticket reopened. Rename queued to \`${reopened.nextName}\` ` +
-              '(Discord rate-limits renames, so it may take a few minutes).'
-          });
-          return;
-        }
-
-        if (interaction.customId === 'ticket:transcript') {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          const channel = await fetchFreshTicketChannel(interaction);
-          const result = await sendTicketTranscript(channel);
-
-          await interaction.editReply({
-            content:
-              `Transcript built from ${result.totalMessages} message(s). ` +
-              `Delivered to ${result.delivered.length}, failed for ${result.failed.length}.`
-          });
-          return;
-        }
-
-        if (interaction.customId === 'ticket:delete') {
-          await interaction.reply({
-            content: `Deleting this channel in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds...`,
-            flags: MessageFlags.Ephemeral
-          });
-          const channel = await fetchFreshTicketChannel(interaction);
-
-          setTimeout(() => {
-            channel
-              .delete(`Classic ticket deleted by ${interaction.user.tag}`)
-              .catch((error) => {
-                console.error(`Failed to delete ticket channel ${channel.id}:`, error?.message || error);
-              });
-          }, TICKET_DELETE_DELAY_MS);
           return;
         }
 
@@ -3424,24 +2972,17 @@ setInterval(() => {
 // guild instead of re-implementing them.
 module.exports = {
   client,
-  FLOW_NEW,
-  FLOW_CLASSIC,
-  flowMeta,
-  sectionFlow,
-  getTicketFlow,
   provisionGuild,
+  publishPanelMessage,
   notifyStaffOfNewTicket,
   collectStaffRecipients,
   BRAND_FOOTER,
   ENABLE_GUILD_MEMBERS,
   positionCategoriesAbove,
   reconcileProvidedChannel,
-  ENABLED_FLOWS,
   BOT_ACTIVITY,
   createTicket,
   closeAndArchiveTicket,
-  closeTicketChannel,
-  reopenTicketChannel,
   getTicketOwnerId,
   getTicketNumber,
   getTicketClaimedBy,
@@ -3460,7 +3001,6 @@ module.exports = {
   updatePinnedTicketControls,
   getGuildConfig,
   TICKET_DELETE_DELAY_MS,
-  CLASSIC_CATEGORY_NAME,
   SUPPORT_CATEGORY_NAME,
   LOG_CHANNEL_NAME,
   DEFAULT_SECTIONS

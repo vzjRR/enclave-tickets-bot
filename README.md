@@ -201,7 +201,6 @@ code never relies on them alone.
 | `LOG_CHANNEL_ID` | empty | Adopt an existing log channel. |
 | `STAFF_ROLE_ID` | empty | Adopt an existing staff role. |
 | `ANCHOR_CATEGORY_ID` | empty | Place new categories above this category. |
-| `ENABLED_FLOWS` | `new` | Which lifecycles to provision. |
 | `BOT_ACTIVITY` | `ENCLAVE RP TICKETS SYSTEM` | Shown under the bot's name. |
 | `BRAND_TAGLINE` | `Discord Manager` | Second half of every embed footer. |
 | `CLOSED_CARD_THUMBNAIL` | empty | Image on the "Ticket Closed" card. |
@@ -270,11 +269,3 @@ re-running `/quick-setup` and resetting ticket numbering.
   and resumes it after a restart.
 - **The admin panel is a staff gate, not an admin gate.** Any role with
   `Manage Messages` or `Manage Channels` on a ticket channel can use it there.
-
-## A second lifecycle
-
-`ENABLED_FLOWS=new,classic` additionally provisions an older style of ticket
-handling — a staff-visible shared category, no DMs, and closing renames the
-channel to `closed-<number>` and keeps it in place with Transcript / Open /
-Delete controls. It exists so the two approaches can be compared on real traffic
-and needs its own second panel channel. Most servers should leave it off.
