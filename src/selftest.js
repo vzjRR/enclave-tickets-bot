@@ -419,6 +419,58 @@ async function run() {
     Boolean(restored.panelChannel && restored.classicPanelChannel));
   check('12 sections restored', restored.sections.length === DEFAULT_SECTIONS.length * 2);
   check('log channel back to #tickets-log', restored.logChannel.name === LOG_CHANNEL_NAME);
+
+  // Runs last, against the restored configuration, so it reads the panel that
+  // is actually live rather than one section 7 moved away.
+  section('9. Branding, wording, and notifications');
+
+  const modal = bot.createReasonModal('test').toJSON();
+  check('reason modal asks "Write your concern:"',
+    modal.components[0].components[0].label === 'Write your concern:',
+    modal.components[0].components[0].label);
+
+  check('footer reads "Enclave Tickets | Discord Manager"',
+    bot.BRAND_FOOTER === 'Enclave Tickets | Discord Manager', bot.BRAND_FOOTER);
+
+  const logMsg = await logChannel.messages.fetch({ limit: 1 });
+  check('log embed carries the branded footer',
+    logMsg.first()?.embeds?.[0]?.footer?.text === bot.BRAND_FOOTER,
+    logMsg.first()?.embeds?.[0]?.footer?.text);
+
+  const liveConfig = getGuildConfig(guild.id);
+  const livePanelChannel = await guild.channels.fetch(liveConfig.channelId);
+  const panelMsg = await livePanelChannel.messages.fetch(liveConfig.messageId);
+  check('panel carries the branded footer',
+    panelMsg.embeds[0]?.footer?.text === bot.BRAND_FOOTER,
+    panelMsg.embeds[0]?.footer?.text);
+  check('no "Modern Flow" text left in the panel footer',
+    !/Modern Flow/.test(panelMsg.embeds[0]?.footer?.text || ''));
+
+  check('member transcripts are enabled', bot.TRANSCRIPT_SEND_TO_OWNER === true);
+  const sampleTranscript = bot.buildTranscriptText(result.panelChannel, []);
+  check('transcript builder produces a usable file body',
+    sampleTranscript.includes(result.panelChannel.id) && sampleTranscript.length > 40);
+
+  // With the Server Members intent off this must degrade to mention-only
+  // rather than throwing or blocking ticket creation.
+  const staffTargets = await bot.collectStaffRecipients(guild, [result.staffRole.id], owner.id);
+  if (bot.ENABLE_GUILD_MEMBERS) {
+    check('staff recipients resolved from the role', Array.isArray(staffTargets));
+  } else {
+    check('staff DM degrades to mention-only without the members intent',
+      staffTargets.length === 0);
+    const notified = await bot.notifyStaffOfNewTicket({
+      guild,
+      section: result.sections[0],
+      channel: result.panelChannel,
+      user: owner,
+      reason: 'selftest',
+      ticketNumber: 9999
+    });
+    check('notifier reports nothing sent instead of failing',
+      notified.attempted === 0 && notified.delivered === 0);
+  }
+
 }
 
 async function main() {

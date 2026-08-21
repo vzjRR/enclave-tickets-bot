@@ -35,6 +35,10 @@ const BRAND_COLOR = 0x90773E;
 const BUILD_ID = 'enclave-tickets-dual-flow-2026-08-21-v2';
 const TICKET_MARKER = 'Enclave Tickets | Ticket';
 
+// Every member-facing embed carries the same footer.
+const BRAND_TAGLINE = (process.env.BRAND_TAGLINE || 'Discord Manager').trim();
+const BRAND_FOOTER = `${BRAND_NAME} | ${BRAND_TAGLINE}`;
+
 // Two ticket lifecycles run side by side in the same guild so they can be
 // compared directly. A ticket records which one it belongs to in its channel
 // topic, and every lifecycle decision branches on that.
@@ -95,8 +99,19 @@ function envFlag(name, fallback) {
 // Transcripts only contain message text when this is on.
 const ENABLE_MESSAGE_CONTENT = envFlag('ENABLE_MESSAGE_CONTENT', false);
 
-// Classic-flow transcripts are DMed on request. Set false to send them only to
-// the staff member who claimed the ticket rather than the member too.
+// Server Members is the other privileged intent. It is only needed to read
+// which members hold the staff role, so that they can be DMed about a new
+// ticket as well as mentioned in it.
+const ENABLE_GUILD_MEMBERS = envFlag('ENABLE_GUILD_MEMBERS', false);
+const STAFF_DM_ON_NEW_TICKET = envFlag('STAFF_DM_ON_NEW_TICKET', true);
+const STAFF_DM_LIMIT = Math.max(
+  1,
+  Number.parseInt(process.env.STAFF_DM_LIMIT || '25', 10) || 25
+);
+
+// Whether the member who opened a ticket receives their own transcript: on
+// close for the modern flow, and on request for the classic one. The ticket
+// log stays staff-only either way, so this is how a member gets their record.
 const TRANSCRIPT_SEND_TO_OWNER = envFlag('TRANSCRIPT_SEND_TO_OWNER', true);
 
 const SETUP_SESSION_TTL_MS = 30 * 60_000;
@@ -121,7 +136,7 @@ const ANCHOR_CATEGORY_ID = (process.env.ANCHOR_CATEGORY_ID || '').trim();
 
 // Which ticket lifecycles to provision. Production usually wants just the
 // modern one; the demo server runs both so they can be compared.
-const ENABLED_FLOWS = (process.env.ENABLED_FLOWS || `${FLOW_NEW},${FLOW_CLASSIC}`)
+const ENABLED_FLOWS = (process.env.ENABLED_FLOWS || FLOW_NEW)
   .split(',')
   .map((flow) => flow.trim().toLowerCase())
   .filter(Boolean);
@@ -158,6 +173,7 @@ let maintenanceRunning = false;
 
 const intents = [GatewayIntentBits.Guilds];
 if (ENABLE_MESSAGE_CONTENT) intents.push(GatewayIntentBits.MessageContent);
+if (ENABLE_GUILD_MEMBERS) intents.push(GatewayIntentBits.GuildMembers);
 
 const client = new Client({ intents });
 
@@ -207,6 +223,25 @@ function ensureTicketInstance(config) {
     ticketInstanceId: config.ticketInstanceId || createTicketInstanceId(),
     closedTicketIds: Array.isArray(config.closedTicketIds) ? config.closedTicketIds : []
   };
+}
+
+function setTicketControlMessageId(guildId, channelId, messageId) {
+  updateGuildConfig(guildId, (config) => {
+    if (!config) return null;
+    return {
+      ...config,
+      controlMessages: { ...(config.controlMessages || {}), [channelId]: messageId }
+    };
+  });
+}
+
+function clearTicketControlMessageId(guildId, channelId) {
+  updateGuildConfig(guildId, (config) => {
+    if (!config?.controlMessages?.[channelId]) return null;
+    const controlMessages = { ...config.controlMessages };
+    delete controlMessages[channelId];
+    return { ...config, controlMessages };
+  });
 }
 
 function setTicketClosedState(guildId, channelId, isClosed) {
@@ -372,7 +407,7 @@ function buildPanelEmbed(config, flow = FLOW_NEW) {
     .setColor(custom.color || meta.color)
     .setTitle(custom.title || `${meta.emoji} ${BRAND_NAME} — ${meta.label}`)
     .setDescription(custom.description || meta.description)
-    .setFooter({ text: `${BRAND_NAME} | ${meta.label}` })
+    .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
   // The bot's own avatar is a Discord-hosted image, so the panel gets artwork
@@ -523,7 +558,7 @@ function createReasonModal(sectionId) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('reason')
-          .setLabel('Why are you opening this ticket?')
+          .setLabel('Write your concern:')
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
           .setMaxLength(1000)
@@ -621,7 +656,7 @@ function buildAdminPanel(channel) {
       { name: 'Category', value: channel.parent ? channel.parent.name : 'No category', inline: true },
       { name: 'Ticket number', value: getTicketNumber(channel) || 'Unknown', inline: true }
     )
-    .setFooter({ text: `${BRAND_NAME} | Admin only` })
+    .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
   return {
@@ -791,8 +826,12 @@ async function refreshGuildTickets(guild, source = 'manual') {
   const config = getGuildConfig(guild.id);
   if (config) {
     const existingIds = new Set(tickets.map((channel) => channel.id));
+    const controlMessages = Object.fromEntries(
+      Object.entries(config.controlMessages || {}).filter(([id]) => existingIds.has(id))
+    );
     setGuildConfig(guild.id, {
       ...config,
+      controlMessages,
       closedTicketIds: (config.closedTicketIds || []).filter((id) => existingIds.has(id)),
       lastRefreshAt: new Date().toISOString()
     });
@@ -1474,6 +1513,10 @@ function getTicketSection(channel) {
 }
 
 function getTicketControlMessageId(channel) {
+  const stored = getGuildConfig(channel?.guild?.id)?.controlMessages?.[channel?.id];
+  if (stored) return stored;
+
+  // Older tickets recorded it in the topic instead.
   const match = channel?.topic?.match(/controlMsg=(\d{17,20})/);
   return match?.[1] || null;
 }
@@ -1535,7 +1578,7 @@ async function resolveLogChannel(guild) {
   return channel?.isTextBased() ? channel : null;
 }
 
-async function writeTicketLog(channel, closedById, reason) {
+async function writeTicketLog(channel, closedById, reason, { messages, transcript }) {
   const logChannel = await resolveLogChannel(channel.guild);
   const ticketNumber = getTicketNumber(channel) || 'unknown';
 
@@ -1551,13 +1594,6 @@ async function writeTicketLog(channel, closedById, reason) {
   const claimedBy = getTicketClaimedBy(channel);
   const openedAt = channel.createdTimestamp;
   const closedAt = Date.now();
-
-  let messages = [];
-  try {
-    messages = await fetchTranscriptMessages(channel);
-  } catch (error) {
-    console.error(`Failed to collect transcript for ${channel.id}:`, error?.message || error);
-  }
 
   const embed = buildClosedTicketCard({
     guild: channel.guild,
@@ -1575,14 +1611,13 @@ async function writeTicketLog(channel, closedById, reason) {
       { name: 'Messages', value: String(messages.length), inline: true },
       { name: 'IDs', value: `owner \`${ownerId || "?"}\`\ncloser \`${closedById}\``, inline: true }
     )
-    .setFooter({ text: `${BRAND_NAME} | Ticket log` })
+    .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
   if (reason) {
     embed.addFields({ name: 'Reason given', value: reason.slice(0, 1024), inline: false });
   }
 
-  const transcript = buildTranscriptText(channel, messages);
   const attachment = new AttachmentBuilder(Buffer.from(transcript, 'utf8'), {
     name: `ticket-${ticketNumber}-transcript.txt`
   });
@@ -1662,7 +1697,18 @@ async function closeAndArchiveTicket(channel, closedById) {
   const ownerId = getTicketOwnerId(channel);
   const ticketNumber = getTicketNumber(channel) || 'unknown';
   const reason = await getTicketReason(channel);
-  const logged = await writeTicketLog(channel, closedById, reason);
+
+  // Collected once and shared: the archive and the member's copy are then
+  // guaranteed to be the same record, and the channel is only read once.
+  let messages = [];
+  try {
+    messages = await fetchTranscriptMessages(channel);
+  } catch (error) {
+    console.error(`Failed to collect transcript for ${channel.id}:`, error?.message || error);
+  }
+  const transcript = buildTranscriptText(channel, messages);
+
+  const logged = await writeTicketLog(channel, closedById, reason, { messages, transcript });
 
   if (ownerId) {
     const card = buildClosedTicketCard({
@@ -1672,13 +1718,23 @@ async function closeAndArchiveTicket(channel, closedById) {
       closedById,
       openedAt: channel.createdTimestamp,
       closedAt: Date.now()
-    }).setFooter({ text: `${BRAND_NAME} | Ticket #${ticketNumber}` });
+    }).setFooter({ text: BRAND_FOOTER });
 
     const row = await buildClosedTicketLink(channel.guild, ownerId, logged.message);
 
+    // A shared log channel cannot show one member only their own entry, so
+    // the member is sent their own transcript instead of being given access
+    // to everyone else's.
+    const files = TRANSCRIPT_SEND_TO_OWNER
+      ? [new AttachmentBuilder(Buffer.from(transcript, 'utf8'), {
+          name: `ticket-${ticketNumber}-transcript.txt`
+        })]
+      : [];
+
     await dmUser(ownerId, {
       embeds: [card],
-      components: row ? [row] : []
+      components: row ? [row] : [],
+      files
     }, 'ticket closed notice');
   }
 
@@ -1687,6 +1743,7 @@ async function closeAndArchiveTicket(channel, closedById) {
   if (pending?.timer) clearTimeout(pending.timer);
   pendingChannelRenames.delete(channel.id);
   clearPendingTicketRename(channel.guild.id, channel.id);
+  clearTicketControlMessageId(channel.guild.id, channel.id);
   setTicketClosedState(channel.guild.id, channel.id, false);
 
   console.log(
@@ -1706,6 +1763,97 @@ async function closeAndArchiveTicket(channel, closedById) {
 // Creates the ticket channel, announces it, pins the controls and (on the
 // modern flow) notifies the member. Interaction-free by design: openTicket
 // wraps it for real users, and the self-test calls it directly.
+// Staff are always mentioned in the ticket channel. DMing them as well needs
+// the role's membership, and reading that needs the privileged Server Members
+// intent -- which, like Message Content, breaks login if requested without
+// being enabled in the Developer Portal. So it is opt-in, and its absence
+// degrades to mention-only rather than failing the ticket.
+let staffDirectoryWarned = false;
+
+async function collectStaffRecipients(guild, roleIds, excludeUserId) {
+  if (!ENABLE_GUILD_MEMBERS) {
+    if (!staffDirectoryWarned) {
+      staffDirectoryWarned = true;
+      console.warn(
+        'STAFF_DM_ON_NEW_TICKET is on but ENABLE_GUILD_MEMBERS is off, so role ' +
+        'membership cannot be read. Staff are still mentioned in the ticket ' +
+        'channel. Enable the Server Members intent in the Developer Portal and ' +
+        'set ENABLE_GUILD_MEMBERS=true to DM them as well.'
+      );
+    }
+    return [];
+  }
+
+  // The member cache is only complete once it has been filled at least once.
+  if (guild.members.cache.size < (guild.memberCount || 0)) {
+    try {
+      await withTimeout(guild.members.fetch(), `Fetch members for ${guild.id}`, 20_000);
+    } catch (error) {
+      console.error(`Could not load the member list for ${guild.id}:`, error?.message || error);
+      return [];
+    }
+  }
+
+  const recipients = new Map();
+  for (const roleId of roleIds || []) {
+    const role = guild.roles.cache.get(roleId);
+    if (!role) continue;
+
+    for (const member of role.members.values()) {
+      if (member.user.bot) continue;
+      if (member.id === excludeUserId) continue;
+      recipients.set(member.id, member);
+    }
+  }
+
+  return [...recipients.values()].slice(0, STAFF_DM_LIMIT);
+}
+
+async function notifyStaffOfNewTicket({ guild, section, channel, user, reason, ticketNumber }) {
+  if (!STAFF_DM_ON_NEW_TICKET) return { attempted: 0, delivered: 0, skipped: true };
+
+  const recipients = await collectStaffRecipients(guild, section.roleIds, user.id);
+  if (!recipients.length) return { attempted: 0, delivered: 0, skipped: false };
+
+  const embed = new EmbedBuilder()
+    .setColor(flowMeta(sectionFlow(section)).color)
+    .setAuthor({
+      name: guild.name,
+      iconURL: guild.iconURL({ size: 128 }) || client.user?.displayAvatarURL({ size: 128 })
+    })
+    .setTitle(`New ${section.name} ticket`)
+    .setDescription(`Opened by <@${user.id}>.\n\nChannel: <#${channel.id}>`)
+    .addFields(
+      { name: 'Ticket', value: `#${ticketNumber}`, inline: true },
+      { name: 'Category', value: section.name, inline: true }
+    )
+    .setFooter({ text: BRAND_FOOTER })
+    .setTimestamp();
+
+  if (reason) {
+    embed.addFields({ name: 'Their concern', value: reason.slice(0, 1024), inline: false });
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setLabel('Open Ticket')
+      .setStyle(ButtonStyle.Link)
+      .setURL(`https://discord.com/channels/${guild.id}/${channel.id}`)
+  );
+
+  let delivered = 0;
+  for (const member of recipients) {
+    const ok = await dmUser(member.id, { embeds: [embed], components: [row] }, 'new ticket alert');
+    if (ok) delivered += 1;
+    await sleep(400);
+  }
+
+  console.log(
+    `Staff alerted for ticket ${ticketNumber}: ${delivered}/${recipients.length} DMs delivered.`
+  );
+  return { attempted: recipients.length, delivered, skipped: false };
+}
+
 async function createTicket({ guild, user, section, reason, config }) {
   const everyoneId = guild.roles.everyone.id;
 
@@ -1780,7 +1928,7 @@ async function createTicket({ guild, user, section, reason, config }) {
       { name: 'Opened at', value: `<t:${openedAt}:f>`, inline: true },
       { name: 'Flow', value: `${meta.emoji} ${meta.label}`, inline: true }
     )
-    .setFooter({ text: `${BRAND_NAME} | ${meta.label}` })
+    .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
   if (isHttpUrl(config.thumbnailUrl)) embed.setThumbnail(config.thumbnailUrl);
@@ -1795,8 +1943,15 @@ async function createTicket({ guild, user, section, reason, config }) {
     allowedMentions: { parse: [], roles: section.roleIds, users: [user.id] }
   });
 
-  // Recorded first so the controls stay findable even when pinning fails.
-  await trySetTicketTopicValue(channel, 'controlMsg', pinned.id);
+  // Recorded so the controls stay findable even when pinning fails, and in
+  // storage rather than the topic so it does not consume a channel edit.
+  setTicketControlMessageId(guild.id, channel.id, pinned.id);
+
+  // Staff are mentioned in the channel above; this DMs them too. Deliberately
+  // not awaited -- the member should not wait on a queue of staff DMs to
+  // learn their ticket exists.
+  notifyStaffOfNewTicket({ guild, section, channel, user, reason, ticketNumber })
+    .catch((error) => console.error('Failed to alert staff:', error?.message || error));
 
   await pinned.pin().catch((error) => {
     if (error?.code === 50013) {
@@ -1822,7 +1977,7 @@ async function createTicket({ guild, user, section, reason, config }) {
           'The support team has been notified. You will get another message here when a staff member picks it up.'
         )
         .addFields({ name: 'Your message', value: reason.slice(0, 1024) })
-        .setFooter({ text: `${BRAND_NAME} | Ticket System` })
+        .setFooter({ text: BRAND_FOOTER })
         .setTimestamp()
     ]
   }, 'ticket created notice');
@@ -2772,6 +2927,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const selectedSection = config.sections.find((item) => item.id === sectionId);
+      if (!selectedSection) {
+        await interaction.reply({
+          content: 'That ticket category is not configured anymore. Ask an admin to refresh the panel.',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
       const existingTicket = await findExistingMemberTicket(
         interaction.guild, interaction.user.id, config, sectionFlow(selectedSection)
       );
@@ -2871,7 +3034,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                   `**${interaction.guild.name}** and is working on it now.\n\n` +
                   `Channel: <#${interaction.channel.id}>`
                 )
-                .setFooter({ text: `${BRAND_NAME} | Ticket System` })
+                .setFooter({ text: BRAND_FOOTER })
                 .setTimestamp()
             ]
             }, 'ticket claimed notice');
@@ -3015,6 +3178,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (!interaction.customId.startsWith('setup:')) return;
 
+      if (!hasGuildManagerPermission(interaction)) {
+        await interaction.reply({
+          content: 'You need the Manage Server permission to use this command.',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
       const session = setupSessions.get(setupSessionKey(interaction));
 
       if (!session) {
@@ -3041,6 +3212,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isChannelSelectMenu() && interaction.customId === 'setup:section-category') {
+      if (!hasGuildManagerPermission(interaction)) {
+        await interaction.reply({
+          content: 'You need the Manage Server permission to use this command.',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
       const session = setupSessions.get(setupSessionKey(interaction));
       if (!session?.pendingSection) {
         await interaction.reply({ content: 'No pending section found.', flags: MessageFlags.Ephemeral });
@@ -3090,6 +3269,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isRoleSelectMenu() && interaction.customId === 'setup:section-roles') {
+      if (!hasGuildManagerPermission(interaction)) {
+        await interaction.reply({
+          content: 'You need the Manage Server permission to use this command.',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
       const session = setupSessions.get(setupSessionKey(interaction));
       if (!session?.pendingSection) {
         await interaction.reply({ content: 'No pending section found.', flags: MessageFlags.Ephemeral });
@@ -3161,6 +3348,10 @@ module.exports = {
   sectionFlow,
   getTicketFlow,
   provisionGuild,
+  notifyStaffOfNewTicket,
+  collectStaffRecipients,
+  BRAND_FOOTER,
+  ENABLE_GUILD_MEMBERS,
   positionCategoriesAbove,
   reconcileProvidedChannel,
   ENABLED_FLOWS,
@@ -3176,6 +3367,9 @@ module.exports = {
   findExistingMemberTicket,
   findTicketControlMessage,
   buildClosedTicketCard,
+  createReasonModal,
+  buildTranscriptText,
+  TRANSCRIPT_SEND_TO_OWNER,
   buildClosedTicketLink,
   getTicketControlMessageId,
   missingOptionalBotPermissions,
