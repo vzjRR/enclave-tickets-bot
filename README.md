@@ -151,6 +151,7 @@ line reads `[no text content]` and the transcript header says so.
 | `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
 | `ENABLE_MESSAGE_CONTENT` | `false` | Privileged intent; see below. |
 | `TRANSCRIPT_SEND_TO_OWNER` | `true` | Classic-flow transcripts go to the member as well as the claiming staff member. |
+| `CLOSED_CARD_THUMBNAIL` | empty | Image on the "Ticket Closed" card. Defaults to the bot avatar. |
 
 ### Message Content intent
 

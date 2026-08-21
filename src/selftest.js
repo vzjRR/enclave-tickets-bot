@@ -210,16 +210,55 @@ async function run() {
     `${logBefore} -> ${logAfter.size}`);
 
   const archive = logAfter.find((m) =>
-    m.embeds[0]?.title === `Ticket #${modernTicketNumber} closed`);
+    m.embeds[0]?.fields?.some((f) => f.name === 'Ticket' && f.value === `#${modernTicketNumber}`));
   check('archive names the right ticket', Boolean(archive));
   check('archive carries a transcript attachment', Boolean(archive && archive.attachments.size > 0));
   if (archive) {
-    const fields = Object.fromEntries(archive.embeds[0].fields.map((f) => [f.name, f.value]));
-    check('archive records who opened it', (fields['Opened by'] || '').includes(owner.id));
-    check('archive records who closed it', (fields['Closed by'] || '').includes(client.user.id));
+    const e = archive.embeds[0];
+    const fields = Object.fromEntries(e.fields.map((f) => [f.name, f.value]));
+    check('card title is "Ticket Closed"', e.title === 'Ticket Closed', e.title);
+    check('card author is the server', e.author?.name === guild.name, e.author?.name);
+    check('card has a thumbnail', Boolean(e.thumbnail?.url));
+    check('card records who opened it', (fields['Opened By'] || '').includes(owner.id));
+    check('card records who claimed it', (fields['Claimed By'] || '').includes(client.user.id));
+    check('card records who closed it', (fields['Closed By'] || '').includes(client.user.id));
+    check('card renders Open Time as a Discord timestamp',
+      /^<t:\d+:F>$/.test(fields['Open Time'] || ''), fields['Open Time']);
+    check('card renders Close Time as a Discord timestamp',
+      /^<t:\d+:F>$/.test(fields['Close Time'] || ''), fields['Close Time']);
     check('archive records the section', fields.Section === modernSection.name);
-    check('archive records how long it was open', Boolean(fields['Open for']));
+    check('archive records how long it was open', Boolean(fields['Open For']));
+
+    const order = e.fields.slice(0, 5).map((f) => f.name).join(',');
+    check('first five fields match the reference layout',
+      order === 'Opened By,Claimed By,Closed By,Open Time,Close Time', order);
+    check('first three fields are inline (3-up row)',
+      e.fields.slice(0, 3).every((f) => f.inline === true));
   }
+
+  // Unclaimed tickets must read "No one" rather than an empty field.
+  const unclaimedCard = bot.buildClosedTicketCard({
+    guild,
+    ownerId: owner.id,
+    claimedBy: null,
+    closedById: client.user.id,
+    openedAt: Date.now() - 60_000,
+    closedAt: Date.now()
+  }).toJSON();
+  check('unclaimed ticket shows "No one"',
+    unclaimedCard.fields.find((f) => f.name === 'Claimed By')?.value === 'No one');
+
+  // The link button must point somewhere the recipient can actually open.
+  const staffRow = await bot.buildClosedTicketLink(guild, owner.id, archive);
+  const staffBtn = staffRow?.toJSON()?.components?.[0];
+  check('a viewer of the log gets "View Ticket"', staffBtn?.label === 'View Ticket', staffBtn?.label);
+  check('View Ticket links to the archived entry',
+    staffBtn?.url === archive?.url, staffBtn?.url);
+
+  const outsiderRow = await bot.buildClosedTicketLink(guild, '000000000000000001', archive);
+  const outsiderBtn = outsiderRow?.toJSON()?.components?.[0];
+  check('someone who cannot see the log gets the panel link instead',
+    outsiderBtn?.label === 'Open a New Ticket', outsiderBtn?.label);
 
   console.log(`        waiting ${TICKET_DELETE_DELAY_MS / 1000}s for the scheduled deletion...`);
   const deleted = await waitFor('modern channel deletion', async () => {

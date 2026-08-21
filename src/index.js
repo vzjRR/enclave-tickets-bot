@@ -100,6 +100,11 @@ const TRANSCRIPT_SEND_TO_OWNER = envFlag('TRANSCRIPT_SEND_TO_OWNER', true);
 
 const SETUP_SESSION_TTL_MS = 30 * 60_000;
 
+// Neutral dark so the closed-ticket card reads as a receipt rather than an
+// alert. Set CLOSED_CARD_THUMBNAIL to any image URL to replace the icon.
+const CLOSED_CARD_COLOR = 0x2b2d31;
+const CLOSED_CARD_THUMBNAIL = (process.env.CLOSED_CARD_THUMBNAIL || '').trim();
+
 // Grace period between announcing a close and destroying the channel, so the
 // people in it can see why it vanished.
 const TICKET_DELETE_DELAY_MS = 10_000;
@@ -1513,19 +1518,21 @@ async function writeTicketLog(channel, closedById, reason) {
     console.error(`Failed to collect transcript for ${channel.id}:`, error?.message || error);
   }
 
-  const embed = new EmbedBuilder()
-    .setColor(BRAND_COLOR)
-    .setTitle(`Ticket #${ticketNumber} closed`)
+  const embed = buildClosedTicketCard({
+    guild: channel.guild,
+    ownerId,
+    claimedBy,
+    closedById,
+    openedAt,
+    closedAt
+  })
     .addFields(
+      { name: 'Ticket', value: `#${ticketNumber}`, inline: true },
       { name: 'Section', value: getTicketSection(channel), inline: true },
       { name: 'Channel', value: `#${channel.name}`, inline: true },
+      { name: 'Open For', value: formatDuration(closedAt - openedAt), inline: true },
       { name: 'Messages', value: String(messages.length), inline: true },
-      { name: 'Opened by', value: ownerId ? `<@${ownerId}>\n\`${ownerId}\`` : 'Unknown', inline: true },
-      { name: 'Claimed by', value: claimedBy ? `<@${claimedBy}>\n\`${claimedBy}\`` : 'Never claimed', inline: true },
-      { name: 'Closed by', value: `<@${closedById}>\n\`${closedById}\``, inline: true },
-      { name: 'Opened at', value: `<t:${Math.floor(openedAt / 1000)}:f>`, inline: true },
-      { name: 'Closed at', value: `<t:${Math.floor(closedAt / 1000)}:f>`, inline: true },
-      { name: 'Open for', value: formatDuration(closedAt - openedAt), inline: true }
+      { name: 'IDs', value: `owner \`${ownerId || "?"}\`\ncloser \`${closedById}\``, inline: true }
     )
     .setFooter({ text: `${BRAND_NAME} | Ticket log` })
     .setTimestamp();
@@ -1540,8 +1547,8 @@ async function writeTicketLog(channel, closedById, reason) {
   });
 
   try {
-    await logChannel.send({ embeds: [embed], files: [attachment] });
-    return { ok: true, messageCount: messages.length };
+    const posted = await logChannel.send({ embeds: [embed], files: [attachment] });
+    return { ok: true, messageCount: messages.length, message: posted };
   } catch (error) {
     console.error(`Failed to write ticket log for ${ticketNumber}:`, error?.message || error);
     return { ok: false, reason: 'send_failed', messageCount: messages.length };
@@ -1551,26 +1558,88 @@ async function writeTicketLog(channel, closedById, reason) {
 // Archive, notify the owner, then delete. The log write happens first and its
 // result is returned, so a caller can refuse to delete a ticket it could not
 // archive.
+// The "Ticket Closed" card: server icon and name in the author line, a 3 + 2
+// grid of inline fields, and Discord-rendered timestamps (the <t:...:F> form
+// renders as "Friday, August 21, 2026 8:07 PM" with the highlighted background).
+function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt, closedAt }) {
+  const embed = new EmbedBuilder()
+    .setColor(CLOSED_CARD_COLOR)
+    .setAuthor({
+      name: guild.name,
+      iconURL: guild.iconURL({ size: 128 }) || client.user?.displayAvatarURL({ size: 128 })
+    })
+    .setTitle('Ticket Closed')
+    .addFields(
+      { name: 'Opened By', value: ownerId ? `<@${ownerId}>` : 'Unknown', inline: true },
+      { name: 'Claimed By', value: claimedBy ? `<@${claimedBy}>` : 'No one', inline: true },
+      { name: 'Closed By', value: closedById ? `<@${closedById}>` : 'Unknown', inline: true },
+      { name: 'Open Time', value: `<t:${Math.floor(openedAt / 1000)}:F>`, inline: true },
+      { name: 'Close Time', value: `<t:${Math.floor(closedAt / 1000)}:F>`, inline: true }
+    );
+
+  const thumbnail = isHttpUrl(CLOSED_CARD_THUMBNAIL)
+    ? CLOSED_CARD_THUMBNAIL
+    : client.user?.displayAvatarURL({ size: 256 });
+  if (thumbnail) embed.setThumbnail(thumbnail);
+
+  return embed;
+}
+
+// A link button only earns its place if the destination actually opens for the
+// person receiving it. Staff get the archived log entry; the member, who cannot
+// see the log channel, gets the panel so they can open a fresh ticket.
+async function buildClosedTicketLink(guild, recipientId, logMessage) {
+  const config = getGuildConfig(guild.id);
+
+  if (logMessage && config?.logChannelId) {
+    const logChannel = await guild.channels.fetch(config.logChannelId).catch(() => null);
+    const member = await guild.members.fetch(recipientId).catch(() => null);
+
+    if (logChannel && member && logChannel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel)) {
+      return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel('View Ticket')
+          .setStyle(ButtonStyle.Link)
+          .setURL(logMessage.url)
+      );
+    }
+  }
+
+  if (config?.channelId) {
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('Open a New Ticket')
+        .setStyle(ButtonStyle.Link)
+        .setURL(`https://discord.com/channels/${guild.id}/${config.channelId}`)
+    );
+  }
+
+  return null;
+}
+
 async function closeAndArchiveTicket(channel, closedById) {
   const ownerId = getTicketOwnerId(channel);
   const ticketNumber = getTicketNumber(channel) || 'unknown';
   const reason = await getTicketReason(channel);
   const logged = await writeTicketLog(channel, closedById, reason);
 
-  await dmUser(ownerId, {
-    embeds: [
-      new EmbedBuilder()
-        .setColor(BRAND_COLOR)
-        .setTitle(`Ticket #${ticketNumber} closed`)
-        .setDescription(
-          `Your ticket in **${channel.guild.name}** was closed by <@${closedById}>, ` +
-          'and the channel has been deleted.\n\n' +
-          'If you still need help, open a new ticket from the panel.'
-        )
-        .setFooter({ text: `${BRAND_NAME} | Ticket System` })
-        .setTimestamp()
-    ]
-  }, 'ticket closed notice');
+  if (ownerId) {
+    const card = buildClosedTicketCard({
+      guild: channel.guild,
+      ownerId,
+      claimedBy: getTicketClaimedBy(channel),
+      closedById,
+      openedAt: channel.createdTimestamp,
+      closedAt: Date.now()
+    }).setFooter({ text: `${BRAND_NAME} | Ticket #${ticketNumber}` });
+
+    const row = await buildClosedTicketLink(channel.guild, ownerId, logged.message);
+
+    await dmUser(ownerId, {
+      embeds: [card],
+      components: row ? [row] : []
+    }, 'ticket closed notice');
+  }
 
   // Drop any queued rename for this channel; it is about to stop existing.
   const pending = pendingChannelRenames.get(channel.id);
@@ -2923,6 +2992,8 @@ module.exports = {
   trySetTicketTopicValue,
   findExistingMemberTicket,
   findTicketControlMessage,
+  buildClosedTicketCard,
+  buildClosedTicketLink,
   getTicketControlMessageId,
   missingOptionalBotPermissions,
   updatePinnedTicketControls,
