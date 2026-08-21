@@ -35,6 +35,18 @@ const commands = [
         .setDescription('Channel to post the panel in (default: create #tickets)')
         .addChannelTypes(ChannelType.GuildText)
     )
+    .addChannelOption((option) =>
+      option
+        .setName('log_channel')
+        .setDescription('Channel to archive closed tickets in (default: create #tickets-log)')
+        .addChannelTypes(ChannelType.GuildText)
+    )
+    .addChannelOption((option) =>
+      option
+        .setName('anchor_category')
+        .setDescription('Place the ticket categories directly above this category')
+        .addChannelTypes(ChannelType.GuildCategory)
+    )
     .addBooleanOption((option) =>
       option
         .setName('single_category')

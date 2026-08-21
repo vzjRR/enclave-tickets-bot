@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const {
   ActionRowBuilder,
+  ActivityType,
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -104,6 +105,46 @@ const SETUP_SESSION_TTL_MS = 30 * 60_000;
 // alert. Set CLOSED_CARD_THUMBNAIL to any image URL to replace the icon.
 const CLOSED_CARD_COLOR = 0x2b2d31;
 const CLOSED_CARD_THUMBNAIL = (process.env.CLOSED_CARD_THUMBNAIL || '').trim();
+
+// Shown under the bot name in the member list.
+const BOT_ACTIVITY = (process.env.BOT_ACTIVITY || 'ENCLAVE RP TICKETS SYSTEM').trim();
+
+// Deployment targets. Setting these lets /quick-setup adopt channels and a
+// role that already exist on the server instead of creating its own, which is
+// what you want on an established community.
+const PANEL_CHANNEL_ID = (process.env.PANEL_CHANNEL_ID || '').trim();
+const LOG_CHANNEL_ID = (process.env.LOG_CHANNEL_ID || '').trim();
+const STAFF_ROLE_ID = (process.env.STAFF_ROLE_ID || '').trim();
+
+// New categories are placed directly above this one.
+const ANCHOR_CATEGORY_ID = (process.env.ANCHOR_CATEGORY_ID || '').trim();
+
+// Which ticket lifecycles to provision. Production usually wants just the
+// modern one; the demo server runs both so they can be compared.
+const ENABLED_FLOWS = (process.env.ENABLED_FLOWS || `${FLOW_NEW},${FLOW_CLASSIC}`)
+  .split(',')
+  .map((flow) => flow.trim().toLowerCase())
+  .filter(Boolean);
+
+async function resolveConfiguredChannel(guild, id) {
+  if (!id) return null;
+  const channel = await guild.channels.fetch(id).catch(() => null);
+  if (!channel) {
+    console.warn(`Configured channel ${id} was not found in guild ${guild.id}; falling back.`);
+    return null;
+  }
+  return channel;
+}
+
+async function resolveConfiguredRole(guild) {
+  if (!STAFF_ROLE_ID) return null;
+  const role = await guild.roles.fetch(STAFF_ROLE_ID).catch(() => null);
+  if (!role) {
+    console.warn(`Configured staff role ${STAFF_ROLE_ID} was not found in guild ${guild.id}; falling back.`);
+    return null;
+  }
+  return role;
+}
 
 // Grace period between announcing a close and destroying the channel, so the
 // people in it can see why it vanished.
@@ -2088,7 +2129,9 @@ async function ensurePanelChannel(guild, providedChannel, flow, parentId, create
 
 // Closed modern tickets are deleted, so this is their only durable record.
 // Staff can read it; nobody but the bot can write to it.
-async function ensureLogChannel(guild, parentId, staffRoleId, created) {
+async function ensureLogChannel(guild, parentId, staffRoleId, created, providedChannel = null) {
+  if (providedChannel) return providedChannel;
+
   const overwrites = [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     {
@@ -2163,52 +2206,164 @@ async function publishFlowPanel(guild, config, flow, channel, prevChannelId, pre
 }
 
 // Interaction-free so the self-test can drive it directly.
+// An existing channel handed to us belongs to the server, not to this bot, so
+// its permissions are added to rather than replaced. Wiping the overwrites on a
+// channel a live community already uses would be destructive and is never worth
+// the tidiness.
+async function reconcileProvidedChannel(channel, { staffRoleId, isLog }) {
+  const warnings = [];
+
+  await channel.permissionOverwrites.edit(client.user.id, {
+    ViewChannel: true,
+    SendMessages: true,
+    EmbedLinks: true,
+    AttachFiles: true,
+    ReadMessageHistory: true,
+    ManageMessages: true
+  }, { reason: `${BRAND_NAME}: bot access` });
+
+  if (isLog) {
+    if (staffRoleId) {
+      await channel.permissionOverwrites.edit(staffRoleId, {
+        ViewChannel: true,
+        ReadMessageHistory: true
+      }, { reason: `${BRAND_NAME}: staff read access to the ticket log` });
+    }
+
+    const everyone = channel.guild.roles.everyone;
+    if (channel.permissionsFor(everyone)?.has(PermissionFlagsBits.ViewChannel)) {
+      warnings.push(
+        `<#${channel.id}> is visible to @everyone. Closed-ticket transcripts are ` +
+        'posted there, so make it staff-only unless that is intended.'
+      );
+    }
+  }
+
+  return warnings;
+}
+
+// Discord orders categories by position among themselves. To drop ours directly
+// above an anchor category, everything is renumbered in one call with the
+// existing relative order preserved.
+async function positionCategoriesAbove(guild, categoryIds, anchorId) {
+  if (!anchorId || !categoryIds.length) return null;
+
+  const anchor = guild.channels.cache.get(anchorId);
+  if (anchor?.type !== ChannelType.GuildCategory) {
+    return { ok: false, reason: 'anchor_not_a_category' };
+  }
+
+  const ours = new Set(categoryIds);
+  const categories = [...guild.channels.cache.values()]
+    .filter((channel) => channel?.type === ChannelType.GuildCategory)
+    .sort((a, b) => a.rawPosition - b.rawPosition);
+
+  const before = [];
+  const after = [];
+  let passedAnchor = false;
+
+  for (const category of categories) {
+    if (category.id === anchorId) { passedAnchor = true; continue; }
+    if (ours.has(category.id)) continue;
+    (passedAnchor ? after : before).push(category);
+  }
+
+  const ordered = [
+    ...before,
+    ...categoryIds.map((id) => guild.channels.cache.get(id)).filter(Boolean),
+    anchor,
+    ...after
+  ];
+
+  try {
+    await guild.channels.setPositions(
+      ordered.map((channel, index) => ({ channel: channel.id, position: index }))
+    );
+    return { ok: true, moved: categoryIds.length, anchor: anchor.name };
+  } catch (error) {
+    console.error('Failed to reorder ticket categories:', error?.message || error);
+    return { ok: false, reason: 'reorder_failed', error };
+  }
+}
+
+// Interaction-free so the self-test can drive it directly.
 async function provisionGuild(guild, options = {}) {
-  const created = { roles: [], categories: [], channels: [], removed: [] };
+  const created = { roles: [], categories: [], channels: [], removed: [], warnings: [] };
+  const flows = (options.flows?.length ? options.flows : ENABLED_FLOWS)
+    .filter((flow) => flow === FLOW_NEW || flow === FLOW_CLASSIC);
+  const useModern = flows.includes(FLOW_NEW);
+  const useClassic = flows.includes(FLOW_CLASSIC);
+
+  if (!useModern && !useClassic) throw new Error('No ticket flows are enabled.');
 
   const staffRole = await ensureStaffRole(guild, options.staffRole || null, created);
   const supportCategory = await ensureSupportCategory(guild, created);
   const sections = [];
+  const ticketCategoryIds = [];
   const stamp = Date.now();
 
-  // Modern flow: one hidden category per section unless asked to share one.
-  const sharedModern = options.singleCategory
-    ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, created)
+  if (useModern) {
+    const sharedModern = options.singleCategory
+      ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, created)
+      : null;
+
+    for (const [index, template] of DEFAULT_SECTIONS.entries()) {
+      const category = sharedModern
+        || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, created);
+
+      if (!ticketCategoryIds.includes(category.id)) ticketCategoryIds.push(category.id);
+
+      sections.push({
+        id: `n${stamp}${index}`,
+        name: template.name,
+        emoji: template.emoji,
+        categoryId: category.id,
+        roleIds: [staffRole.id],
+        flow: FLOW_NEW
+      });
+    }
+  }
+
+  if (useClassic) {
+    const classicCategory = await ensureClassicCategory(guild, staffRole.id, created);
+    if (!ticketCategoryIds.includes(classicCategory.id)) ticketCategoryIds.push(classicCategory.id);
+
+    for (const [index, template] of DEFAULT_SECTIONS.entries()) {
+      sections.push({
+        id: `c${stamp}${index}`,
+        name: template.name,
+        emoji: template.emoji,
+        categoryId: classicCategory.id,
+        roleIds: [staffRole.id],
+        flow: FLOW_CLASSIC
+      });
+    }
+  }
+
+  const panelChannel = useModern
+    ? await ensurePanelChannel(guild, options.panelChannel || null, FLOW_NEW, supportCategory.id, created)
+    : null;
+  const classicPanelChannel = useClassic
+    ? await ensurePanelChannel(guild, options.classicPanelChannel || null, FLOW_CLASSIC, supportCategory.id, created)
+    : null;
+  const logChannel = await ensureLogChannel(
+    guild, supportCategory.id, staffRole.id, created, options.logChannel || null
+  );
+
+  // Existing channels get additive permission fixes only.
+  for (const [channel, isLog] of [[options.panelChannel, false], [options.classicPanelChannel, false], [options.logChannel, true]]) {
+    if (!channel) continue;
+    created.warnings.push(...await reconcileProvidedChannel(channel, { staffRoleId: staffRole.id, isLog }));
+  }
+
+  const anchorId = options.anchorCategoryId || ANCHOR_CATEGORY_ID;
+  const positioned = anchorId
+    ? await positionCategoriesAbove(guild, [supportCategory.id, ...ticketCategoryIds], anchorId)
     : null;
 
-  for (const [index, template] of DEFAULT_SECTIONS.entries()) {
-    const category = sharedModern
-      || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, created);
-
-    sections.push({
-      id: `n${stamp}${index}`,
-      name: template.name,
-      emoji: template.emoji,
-      categoryId: category.id,
-      roleIds: [staffRole.id],
-      flow: FLOW_NEW
-    });
+  if (positioned && !positioned.ok) {
+    created.warnings.push(`Could not place the categories above the anchor (${positioned.reason}).`);
   }
-
-  const classicCategory = await ensureClassicCategory(guild, staffRole.id, created);
-  for (const [index, template] of DEFAULT_SECTIONS.entries()) {
-    sections.push({
-      id: `c${stamp}${index}`,
-      name: template.name,
-      emoji: template.emoji,
-      categoryId: classicCategory.id,
-      roleIds: [staffRole.id],
-      flow: FLOW_CLASSIC
-    });
-  }
-
-  const panelChannel = await ensurePanelChannel(
-    guild, options.panelChannel || null, FLOW_NEW, supportCategory.id, created
-  );
-  const classicPanelChannel = await ensurePanelChannel(
-    guild, null, FLOW_CLASSIC, supportCategory.id, created
-  );
-  const logChannel = await ensureLogChannel(guild, supportCategory.id, staffRole.id, created);
 
   const existing = getGuildConfig(guild.id);
   const config = ensureTicketInstance({
@@ -2223,31 +2378,32 @@ async function provisionGuild(guild, options = {}) {
     ticketCounter: Number(existing?.ticketCounter) || 2000
   });
 
-  const modernPanel = await publishFlowPanel(
-    guild, config, FLOW_NEW, panelChannel, existing?.channelId, existing?.messageId, created
-  );
-  const classicPanel = await publishFlowPanel(
-    guild, config, FLOW_CLASSIC, classicPanelChannel,
-    existing?.classicChannelId, existing?.classicMessageId, created
-  );
+  const modernPanel = panelChannel
+    ? await publishFlowPanel(guild, config, FLOW_NEW, panelChannel, existing?.channelId, existing?.messageId, created)
+    : null;
+  const classicPanel = classicPanelChannel
+    ? await publishFlowPanel(guild, config, FLOW_CLASSIC, classicPanelChannel,
+        existing?.classicChannelId, existing?.classicMessageId, created)
+    : null;
 
   const saved = setGuildConfig(guild.id, {
     ...config,
-    channelId: panelChannel.id,
+    channelId: panelChannel?.id || null,
     messageId: modernPanel?.id || null,
-    classicChannelId: classicPanelChannel.id,
+    classicChannelId: classicPanelChannel?.id || null,
     classicMessageId: classicPanel?.id || null,
     updatedAt: new Date().toISOString()
   });
 
   console.log(
-    `Provisioned ${guild.id}: sections=${sections.length} ` +
+    `Provisioned ${guild.id}: flows=${flows.join('+')} sections=${sections.length} ` +
     `roles=${created.roles.length} categories=${created.categories.length} ` +
-    `channels=${created.channels.length} removed=${created.removed.length}`
+    `channels=${created.channels.length} removed=${created.removed.length} ` +
+    `positioned=${positioned?.ok ? 'yes' : 'no'}`
   );
 
   return {
-    created, staffRole, supportCategory, classicCategory,
+    created, flows, staffRole, supportCategory, positioned,
     panelChannel, classicPanelChannel, logChannel, sections, config: saved
   };
 }
@@ -2268,23 +2424,37 @@ async function runQuickSetup(interaction) {
   }
 
   const result = await provisionGuild(guild, {
-    staffRole: interaction.options.getRole('staff_role'),
-    panelChannel: interaction.options.getChannel('panel_channel'),
+    staffRole: interaction.options.getRole('staff_role') || await resolveConfiguredRole(guild),
+    panelChannel: interaction.options.getChannel('panel_channel')
+      || await resolveConfiguredChannel(guild, PANEL_CHANNEL_ID),
+    logChannel: interaction.options.getChannel('log_channel')
+      || await resolveConfiguredChannel(guild, LOG_CHANNEL_ID),
+    anchorCategoryId: interaction.options.getChannel('anchor_category')?.id || ANCHOR_CATEGORY_ID,
     singleCategory: interaction.options.getBoolean('single_category') ?? false
   });
 
   const { created } = result;
   const line = (label, items) => (items.length ? `${label}: ${items.join(', ')}` : `${label}: none`);
+  const flowLines = [];
+
+  if (result.panelChannel) {
+    flowLines.push(`${flowMeta(FLOW_NEW).emoji} **${flowMeta(FLOW_NEW).label}**: <#${result.panelChannel.id}>`);
+  }
+  if (result.classicPanelChannel) {
+    flowLines.push(`${flowMeta(FLOW_CLASSIC).emoji} **${flowMeta(FLOW_CLASSIC).label}**: <#${result.classicPanelChannel.id}>`);
+  }
 
   await interaction.editReply({
     content: [
-      `**${BRAND_NAME}** is ready in **${guild.name}**. Both flows are live.`,
+      `**${BRAND_NAME}** is ready in **${guild.name}**.`,
       '',
-      `${flowMeta(FLOW_NEW).emoji} **${flowMeta(FLOW_NEW).label}** panel: <#${result.panelChannel.id}>`,
-      `${flowMeta(FLOW_CLASSIC).emoji} **${flowMeta(FLOW_CLASSIC).label}** panel: <#${result.classicPanelChannel.id}>`,
+      ...flowLines,
       `Ticket log: <#${result.logChannel.id}>`,
       `Staff role: <@&${result.staffRole.id}>`,
-      `Sections: ${result.sections.length} (${DEFAULT_SECTIONS.length} per flow)`,
+      `Sections: ${result.sections.length}`,
+      result.positioned?.ok
+        ? `Categories placed above **${result.positioned.anchor}**.`
+        : '',
       '',
       line('Roles created', created.roles),
       line('Categories created', created.categories),
@@ -2292,6 +2462,7 @@ async function runQuickSetup(interaction) {
       line('Cleaned up', created.removed),
       '',
       `Add your staff to <@&${result.staffRole.id}> so they get ticket access.`,
+      ...(created.warnings.length ? ['', '**Warnings**', ...created.warnings.map((w) => '- ' + w)] : []),
       ...(missingOptionalBotPermissions(guild).length
         ? [
             '',
@@ -2300,7 +2471,7 @@ async function runQuickSetup(interaction) {
             'Re-invite with that permission to restore pinning.'
           ]
         : [])
-    ].join('\n')
+    ].filter((l) => l !== '').join('\n')
   });
 }
 
@@ -2311,6 +2482,14 @@ client.once(Events.ClientReady, (readyClient) => {
     console.error('Failed to resume pending ticket renames:', error);
   });
   console.log(`Automatic ticket refresh interval: ${REFRESH_INTERVAL_MINUTES} minutes`);
+
+  if (BOT_ACTIVITY) {
+    readyClient.user.setPresence({
+      status: 'online',
+      activities: [{ name: BOT_ACTIVITY, type: ActivityType.Custom, state: BOT_ACTIVITY }]
+    });
+    console.log(`Presence set to: ${BOT_ACTIVITY}`);
+  }
   setTimeout(() => runAutomaticMaintenance().catch(console.error), 15_000);
 });
 
@@ -2982,6 +3161,10 @@ module.exports = {
   sectionFlow,
   getTicketFlow,
   provisionGuild,
+  positionCategoriesAbove,
+  reconcileProvidedChannel,
+  ENABLED_FLOWS,
+  BOT_ACTIVITY,
   createTicket,
   closeAndArchiveTicket,
   closeTicketChannel,

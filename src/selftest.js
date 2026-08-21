@@ -351,6 +351,74 @@ async function run() {
     console.log(`        rename deferred by Discord's rate limit; queued as ` +
       `${JSON.stringify(pending[classicChannel.id])}`);
   }
+
+  // -------------------------------------------------------------------------
+  // Mirrors deploying onto an established server: the panel channel, log
+  // channel and staff role already exist, and the categories have to land above
+  // a specific anchor. This is the path that runs against production, so it is
+  // worth exercising before it does.
+  section('7. Production-style adoption of existing channels');
+
+  const anchor = await guild.channels.create({
+    name: 'ZZ-ANCHOR-TEST', type: ChannelType.GuildCategory
+  });
+  cleanup.push(anchor);
+  const existingPanel = await guild.channels.create({ name: 'adopt-panel-test', type: ChannelType.GuildText });
+  cleanup.push(existingPanel);
+  const existingLog = await guild.channels.create({ name: 'adopt-log-test', type: ChannelType.GuildText });
+  cleanup.push(existingLog);
+
+  // A pre-existing overwrite that must survive adoption untouched.
+  await existingPanel.permissionOverwrites.edit(guild.roles.everyone.id, { AddReactions: false });
+
+  const deploy = await provisionGuild(guild, {
+    staffRole: result.staffRole,
+    panelChannel: existingPanel,
+    logChannel: existingLog,
+    anchorCategoryId: anchor.id,
+    flows: [FLOW_NEW]
+  });
+
+  check('adopted the provided panel channel', deploy.panelChannel?.id === existingPanel.id);
+  check('adopted the provided log channel', deploy.logChannel?.id === existingLog.id);
+  check('config points at the adopted log channel',
+    getGuildConfig(guild.id).logChannelId === existingLog.id);
+  check('classic flow skipped when not enabled', deploy.classicPanelChannel === null);
+  check('only modern sections were created',
+    deploy.sections.length === DEFAULT_SECTIONS.length &&
+    deploy.sections.every((sec) => sectionFlow(sec) === FLOW_NEW));
+
+  const adopted = await existingPanel.messages.fetch({ limit: 5 });
+  check('panel published into the adopted channel',
+    adopted.some((m) => m.embeds[0]?.title?.includes('Modern Flow')));
+
+  const freshPanel = await guild.channels.fetch(existingPanel.id, { force: true });
+  check('pre-existing overwrite on the adopted channel survived',
+    Boolean(freshPanel.permissionOverwrites.cache
+      .get(guild.roles.everyone.id)?.deny.has(PermissionFlagsBits.AddReactions)));
+  check('bot was granted access to the adopted channel',
+    Boolean(freshPanel.permissionOverwrites.cache
+      .get(client.user.id)?.allow.has(PermissionFlagsBits.ViewChannel)));
+
+  await guild.channels.fetch();
+  const anchorFresh = guild.channels.cache.get(anchor.id);
+  const support = guild.channels.cache.get(deploy.supportCategory.id);
+  check('positioning reported success', deploy.positioned?.ok === true, deploy.positioned?.reason);
+  check('Support Center sits above the anchor',
+    support.rawPosition < anchorFresh.rawPosition,
+    `${support.rawPosition} vs ${anchorFresh.rawPosition}`);
+
+  const deployCats = [...new Set(deploy.sections.map((sec) => sec.categoryId))];
+  check('every ticket category sits above the anchor',
+    deployCats.every((id) => guild.channels.cache.get(id).rawPosition < anchorFresh.rawPosition));
+
+  // -------------------------------------------------------------------------
+  section('8. Restore the demo server to both flows');
+  const restored = await provisionGuild(guild, { staffRole: result.staffRole });
+  check('both panels are back',
+    Boolean(restored.panelChannel && restored.classicPanelChannel));
+  check('12 sections restored', restored.sections.length === DEFAULT_SECTIONS.length * 2);
+  check('log channel back to #tickets-log', restored.logChannel.name === LOG_CHANNEL_NAME);
 }
 
 async function main() {

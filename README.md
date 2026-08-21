@@ -104,12 +104,47 @@ guild-wide permissions — all of its access comes from channel overwrites.
 | --- | --- |
 | `staff_role` | Creates/reuses `Ticket Staff` |
 | `panel_channel` | Creates/reuses `#create-ticket` under `Support Center` |
+| `log_channel` | Creates/reuses `#tickets-log` |
+| `anchor_category` | None — new categories go wherever Discord puts them |
 | `single_category` | `false` — one modern category per section. `true` puts them all in one shared `🎫 TICKETS` category |
 
 It is **idempotent**: roles, categories and channels are matched by name and
 reused, panel messages are edited in place, category permissions are re-applied
 on every run, and panel presentation is reset to the flow defaults. If a panel
 moves channels, the old message is deleted so members cannot use a stale menu.
+
+### Adopting an existing server
+
+On an established community you usually already have a tickets channel, a log
+channel and a staff role. Point the bot at them in `.env` and `/quick-setup`
+adopts them instead of creating its own:
+
+```env
+PANEL_CHANNEL_ID=1535680161704452116
+LOG_CHANNEL_ID=1535680712944918602
+STAFF_ROLE_ID=1540394789550432288
+ANCHOR_CATEGORY_ID=1535680078279741521
+ENABLED_FLOWS=new
+```
+
+Each has a matching `/quick-setup` option (`panel_channel`, `log_channel`,
+`anchor_category`, `staff_role`) if you would rather pass them per run.
+
+**Adopted channels are never wiped.** For a channel the bot creates it sets the
+full permission overwrites; for one you hand it, it only *adds* what it needs —
+its own access, plus staff read access on the log channel. Whatever overwrites
+the channel already had are left alone, because that channel belongs to the
+server rather than to this bot.
+
+The one thing it will not do silently is change who can see your log channel.
+If `@everyone` can read it, `/quick-setup` warns you and leaves it as it is —
+closed-ticket transcripts get posted there, so that is your call to make.
+
+`ANCHOR_CATEGORY_ID` places the new categories directly above that category,
+preserving the relative order of everything else in the list.
+
+`ENABLED_FLOWS` picks which lifecycles to provision. Production normally wants
+`new` on its own; set `new,classic` to run both side by side.
 
 ### How the hidden categories work
 
@@ -147,7 +182,13 @@ line reads `[no text content]` and the transcript header says so.
 | --- | --- | --- |
 | `DISCORD_TOKEN` | — | Bot token. Required. |
 | `CLIENT_ID` | — | Application ID. Required for command registration. |
-| `GUILD_ID` | empty | Register commands to one guild instantly. Empty registers globally. |
+| `GUILD_ID` | empty | Register commands to one guild instantly. Empty registers globally. Run `npm run guilds` to list ids. |
+| `PANEL_CHANNEL_ID` | empty | Adopt an existing channel for the panel. |
+| `LOG_CHANNEL_ID` | empty | Adopt an existing channel for the archive. |
+| `STAFF_ROLE_ID` | empty | Adopt an existing staff role. |
+| `ANCHOR_CATEGORY_ID` | empty | Place new categories directly above this category. |
+| `ENABLED_FLOWS` | `new,classic` | Which lifecycles to provision. |
+| `BOT_ACTIVITY` | `ENCLAVE RP TICKETS SYSTEM` | Shown under the bot name in the member list. |
 | `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
 | `ENABLE_MESSAGE_CONTENT` | `false` | Privileged intent; see below. |
 | `TRANSCRIPT_SEND_TO_OWNER` | `true` | Classic-flow transcripts go to the member as well as the claiming staff member. |
@@ -179,6 +220,22 @@ Every one of these is re-checked inside the bot. Discord's "default member
 permissions" are only a default that a server admin can override per role, so
 the code does not rely on them alone.
 
+## Running it on a server
+
+See [`deploy/README.md`](deploy/README.md) for a Linux / Oracle Cloud setup:
+a systemd unit that restarts the bot on exit, a dedicated service user,
+filesystem confinement, log access via `journalctl`, and a backup command for
+`data/`. It is scoped so it can sit alongside other bots on the same box.
+
+| Script | |
+| --- | --- |
+| `npm start` | Run the bot |
+| `npm run deploy` | Register slash commands |
+| `npm run guilds` | List servers the bot is in, with ids |
+| `npm run selftest` | Full live test suite (see below) |
+| `npm run check` | Syntax-check every source file |
+| `npm run audit` | Dependency vulnerability scan |
+
 ## Self-test
 
 ```powershell
@@ -190,8 +247,12 @@ asserts the structure and every permission rule, opens a ticket in each flow,
 claims and closes them, and checks that the modern one was archived and deleted
 while the classic one was renamed and kept. It cleans up after itself.
 
-58 assertions. Note it will open and close real tickets in that guild and send
-DMs to the guild owner, so point it at a test server.
+84 assertions, covering both flows end to end plus the production path:
+adopting existing channels, preserving their overwrites, positioning
+categories above an anchor, and provisioning a single flow.
+
+It opens and closes real tickets in that guild and DMs the guild owner, so
+point it at a test server, never at production.
 
 ## Data and backups
 
