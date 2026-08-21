@@ -49,11 +49,11 @@ function envFlag(name, fallback) {
 // Transcripts only contain message text when this is on.
 const ENABLE_MESSAGE_CONTENT = envFlag('ENABLE_MESSAGE_CONTENT', false);
 
-// Transcripts include everything staff said inside the ticket. Set this to
-// false to deliver them only to the staff member who claimed the ticket.
-const TRANSCRIPT_SEND_TO_OWNER = envFlag('TRANSCRIPT_SEND_TO_OWNER', true);
-
 const SETUP_SESSION_TTL_MS = 30 * 60_000;
+
+// Grace period between announcing a close and destroying the channel, so the
+// people in it can see why it vanished.
+const TICKET_DELETE_DELAY_MS = 10_000;
 
 const setupSessions = new Map();
 const ticketCreationLocks = new Set();
@@ -595,7 +595,7 @@ function buildTicketControls(status = 'open', claimedBy = null) {
         .setDisabled(Boolean(claimedBy) || isClosed),
       new ButtonBuilder()
         .setCustomId('ticket:close')
-        .setLabel('Close')
+        .setLabel('Close & Delete')
         .setStyle(ButtonStyle.Danger)
         .setDisabled(isClosed),
       new ButtonBuilder()
@@ -614,51 +614,6 @@ function buildTicketBusyControls(label) {
         .setLabel(label)
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(true)
-    )
-  ];
-}
-
-function buildClosedTicketEmbeds(closedById) {
-  return [
-    new EmbedBuilder()
-      .setColor(0xffff00)
-      .setDescription(`Ticket Closed by <@${closedById}>`),
-    new EmbedBuilder()
-      .setColor(0x2f3136)
-      .setDescription('```Support team ticket controls```')
-  ];
-}
-
-function buildClosedTicketSummaryEmbed(closedById) {
-  return new EmbedBuilder()
-    .setColor(0xffff00)
-    .setDescription(`Ticket Closed by <@${closedById}>`);
-}
-
-function buildOpenedTicketEmbed(openedById) {
-  return new EmbedBuilder()
-    .setColor(0x2ecc71)
-    .setDescription(`Ticket Opened by <@${openedById}>`);
-}
-
-function buildClosedTicketControls(disabled = false) {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('ticket:transcript')
-        .setLabel('Transcript')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(disabled),
-      new ButtonBuilder()
-        .setCustomId('ticket:reopen')
-        .setLabel('Open')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(disabled),
-      new ButtonBuilder()
-        .setCustomId('ticket:delete')
-        .setLabel('Delete')
-        .setStyle(ButtonStyle.Danger)
-        .setDisabled(disabled)
     )
   ];
 }
@@ -781,23 +736,6 @@ function getTicketNumber(channel) {
   return nameMatch?.[1] || null;
 }
 
-function getOpenTicketName(channel) {
-  const ticketNumber = getTicketNumber(channel);
-  return ticketNumber ? `ticket-${ticketNumber}` : channel.name.replace(/^closed-/, '');
-}
-
-function getClosedTicketName(channel) {
-  const ticketNumber = getTicketNumber(channel);
-  if (ticketNumber) return `closed-${ticketNumber}`;
-
-  const openName = getOpenTicketName(channel);
-  return openName.startsWith('closed-') ? openName : `closed-${openName}`.slice(0, 100);
-}
-
-function getReopenTicketName(channel) {
-  return getOpenTicketName(channel);
-}
-
 async function setTicketTopicValue(channel, key, value) {
   const topic = channel.topic || TICKET_MARKER;
   const pair = `${key}=${value}`;
@@ -909,36 +847,6 @@ function buildTranscriptText(channel, messages) {
   }
 
   return lines.join('\n');
-}
-
-async function sendTicketTranscript(channel) {
-  const ownerId = getTicketOwnerId(channel);
-  const claimedBy = getTicketClaimedBy(channel);
-  const messages = await fetchTranscriptMessages(channel);
-  const transcript = buildTranscriptText(channel, messages);
-  const fileName = `${channel.name}-transcript.txt`;
-  const recipients = [...new Set(
-    (TRANSCRIPT_SEND_TO_OWNER ? [ownerId, claimedBy] : [claimedBy]).filter(Boolean)
-  )];
-  const delivered = [];
-  const failed = [];
-
-  for (const userId of recipients) {
-    try {
-      const user = await client.users.fetch(userId);
-      const attachment = new AttachmentBuilder(Buffer.from(transcript, 'utf8'), { name: fileName });
-      await user.send({
-        content: `Transcript for ${channel.name}`,
-        files: [attachment]
-      });
-      delivered.push(`<@${userId}>`);
-    } catch (error) {
-      console.error(`Failed to DM transcript to ${userId}:`, error);
-      failed.push(`<@${userId}>`);
-    }
-  }
-
-  return { delivered, failed, totalMessages: messages.length };
 }
 
 // Renames go through discord.js so they share its global rate-limit bucket.
@@ -1126,64 +1034,6 @@ async function resumePendingRenames() {
   }
 }
 
-async function closeTicketChannel(channel) {
-  const ownerId = getTicketOwnerId(channel);
-  const nextName = getClosedTicketName(channel);
-
-  setTicketClosedState(channel.guild.id, channel.id, true);
-  scheduleTicketRename(channel, nextName, 'close');
-
-  if (ownerId) {
-    try {
-      await editPermissionOverwrite(
-        channel,
-        ownerId,
-        {
-          ViewChannel: false,
-          SendMessages: false,
-          AttachFiles: false,
-          ReadMessageHistory: false
-        },
-        `Close ticket owner permissions for ${channel.id}`
-      );
-    } catch (error) {
-      console.error(`Failed to close ticket owner permissions for ${channel.id}:`, error);
-    }
-  }
-
-  console.log(`Ticket channel closed: ${channel.id} #${channel.name}; rename scheduled to #${nextName}`);
-  return { ok: true, oldName: channel.name, nextName, expectedName: nextName, channel, renameOk: null };
-}
-
-async function reopenTicketChannel(channel) {
-  const ownerId = getTicketOwnerId(channel);
-  const nextName = getReopenTicketName(channel);
-
-  setTicketClosedState(channel.guild.id, channel.id, false);
-
-  if (ownerId) {
-    try {
-      await editPermissionOverwrite(
-        channel,
-        ownerId,
-        {
-          ViewChannel: true,
-          SendMessages: true,
-          AttachFiles: true,
-          ReadMessageHistory: true
-        },
-        `Open ticket owner permissions for ${channel.id}`
-      );
-    } catch (error) {
-      console.error(`Failed to open ticket owner permissions for ${channel.id}:`, error);
-    }
-  }
-
-  scheduleTicketRename(channel, nextName, 'reopen');
-
-  return { ok: true, channel, oldName: channel.name, nextName, expectedName: nextName, renameOk: null };
-}
-
 async function publishPanel(interaction, session) {
   const channel = await interaction.guild.channels.fetch(session.channelId);
   if (!channel || !channel.isTextBased()) {
@@ -1305,6 +1155,178 @@ async function findExistingMemberTicket(guild, userId, config) {
 
     return true;
   }) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Ticket archival
+//
+// Closing a ticket deletes the channel outright, so everything worth keeping has
+// to be written to the log channel first: who opened it, who claimed it, how
+// long it stayed open, the reason given, and the full message transcript.
+// ---------------------------------------------------------------------------
+
+async function dmUser(userId, payload, label) {
+  if (!userId) return false;
+
+  try {
+    const user = await client.users.fetch(userId);
+    await user.send(payload);
+    return true;
+  } catch (error) {
+    // Members can close their DMs. That must never abort a ticket operation.
+    console.error(`Failed to DM ${label} to ${userId}:`, error?.message || error);
+    return false;
+  }
+}
+
+function getTicketSection(channel) {
+  const match = channel?.topic?.match(/section=([^|]*)/);
+  return match?.[1]?.trim() || 'Unknown';
+}
+
+async function findPinnedTicketMessage(channel) {
+  const pins = await withTimeout(channel.messages.fetchPins(), `Fetch pins for ${channel.id}`);
+  return pins.items
+    .map((pin) => pin.message)
+    .find((message) => message.author.id === client.user.id && messageHasButton(message, 'ticket:claim'))
+    || null;
+}
+
+async function getTicketReason(channel) {
+  try {
+    const pinned = await findPinnedTicketMessage(channel);
+    return pinned?.embeds?.[0]?.description?.trim() || null;
+  } catch (error) {
+    console.error(`Failed to read ticket reason for ${channel.id}:`, error?.message || error);
+    return null;
+  }
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return 'unknown';
+
+  const minutes = Math.floor(ms / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const parts = [];
+
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  parts.push(`${minutes % 60}m`);
+
+  return parts.join(' ');
+}
+
+async function resolveLogChannel(guild) {
+  const config = getGuildConfig(guild.id);
+  if (!config?.logChannelId) return null;
+
+  const channel = await guild.channels.fetch(config.logChannelId).catch(() => null);
+  return channel?.isTextBased() ? channel : null;
+}
+
+async function writeTicketLog(channel, closedById, reason) {
+  const logChannel = await resolveLogChannel(channel.guild);
+  const ticketNumber = getTicketNumber(channel) || 'unknown';
+
+  if (!logChannel) {
+    console.error(
+      `No tickets-log channel configured for guild ${channel.guild.id}. ` +
+      `Ticket ${ticketNumber} was closed without an archive. Run /quick-setup to create one.`
+    );
+    return { ok: false, reason: 'no_log_channel', messageCount: 0 };
+  }
+
+  const ownerId = getTicketOwnerId(channel);
+  const claimedBy = getTicketClaimedBy(channel);
+  const openedAt = channel.createdTimestamp;
+  const closedAt = Date.now();
+
+  let messages = [];
+  try {
+    messages = await fetchTranscriptMessages(channel);
+  } catch (error) {
+    console.error(`Failed to collect transcript for ${channel.id}:`, error?.message || error);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setTitle(`Ticket #${ticketNumber} closed`)
+    .addFields(
+      { name: 'Section', value: getTicketSection(channel), inline: true },
+      { name: 'Channel', value: `#${channel.name}`, inline: true },
+      { name: 'Messages', value: String(messages.length), inline: true },
+      { name: 'Opened by', value: ownerId ? `<@${ownerId}>\n\`${ownerId}\`` : 'Unknown', inline: true },
+      { name: 'Claimed by', value: claimedBy ? `<@${claimedBy}>\n\`${claimedBy}\`` : 'Never claimed', inline: true },
+      { name: 'Closed by', value: `<@${closedById}>\n\`${closedById}\``, inline: true },
+      { name: 'Opened at', value: `<t:${Math.floor(openedAt / 1000)}:f>`, inline: true },
+      { name: 'Closed at', value: `<t:${Math.floor(closedAt / 1000)}:f>`, inline: true },
+      { name: 'Open for', value: formatDuration(closedAt - openedAt), inline: true }
+    )
+    .setFooter({ text: `${BRAND_NAME} | Ticket log` })
+    .setTimestamp();
+
+  if (reason) {
+    embed.addFields({ name: 'Reason given', value: reason.slice(0, 1024), inline: false });
+  }
+
+  const transcript = buildTranscriptText(channel, messages);
+  const attachment = new AttachmentBuilder(Buffer.from(transcript, 'utf8'), {
+    name: `ticket-${ticketNumber}-transcript.txt`
+  });
+
+  try {
+    await logChannel.send({ embeds: [embed], files: [attachment] });
+    return { ok: true, messageCount: messages.length };
+  } catch (error) {
+    console.error(`Failed to write ticket log for ${ticketNumber}:`, error?.message || error);
+    return { ok: false, reason: 'send_failed', messageCount: messages.length };
+  }
+}
+
+// Archive, notify the owner, then delete. The log write happens first and its
+// result is returned, so a caller can refuse to delete a ticket it could not
+// archive.
+async function closeAndArchiveTicket(channel, closedById) {
+  const ownerId = getTicketOwnerId(channel);
+  const ticketNumber = getTicketNumber(channel) || 'unknown';
+  const reason = await getTicketReason(channel);
+  const logged = await writeTicketLog(channel, closedById, reason);
+
+  await dmUser(ownerId, {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(BRAND_COLOR)
+        .setTitle(`Ticket #${ticketNumber} closed`)
+        .setDescription(
+          `Your ticket in **${channel.guild.name}** was closed by <@${closedById}>, ` +
+          'and the channel has been deleted.\n\n' +
+          'If you still need help, open a new ticket from the panel.'
+        )
+        .setFooter({ text: `${BRAND_NAME} | Ticket System` })
+        .setTimestamp()
+    ]
+  }, 'ticket closed notice');
+
+  // Drop any queued rename for this channel; it is about to stop existing.
+  const pending = pendingChannelRenames.get(channel.id);
+  if (pending?.timer) clearTimeout(pending.timer);
+  pendingChannelRenames.delete(channel.id);
+  clearPendingTicketRename(channel.guild.id, channel.id);
+  setTicketClosedState(channel.guild.id, channel.id, false);
+
+  console.log(
+    `Ticket ${ticketNumber} closed by ${closedById}; archived=${logged.ok} ` +
+    `messages=${logged.messageCount}; deleting channel ${channel.id}`
+  );
+
+  setTimeout(() => {
+    channel.delete(`Ticket #${ticketNumber} closed by ${closedById}`).catch((error) => {
+      console.error(`Failed to delete ticket channel ${channel.id}:`, error?.message || error);
+    });
+  }, TICKET_DELETE_DELAY_MS);
+
+  return { ok: true, ticketNumber, logged };
 }
 
 async function openTicket(interaction, sectionId, reason) {
@@ -1434,6 +1456,31 @@ async function openTicket(interaction, sectionId, reason) {
     console.error('Failed to pin ticket message:', error);
   });
 
+  const notified = await dmUser(interaction.user.id, {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(config.color || BRAND_COLOR)
+        .setTitle(`Ticket #${ticketNumber} created`)
+        .setDescription(
+          `Your **${section.name}** ticket in **${guild.name}** is open.\n\n` +
+          `Channel: <#${channel.id}>\n\n` +
+          'The support team has been notified. You will get another message here when a staff member picks it up.'
+        )
+        .addFields({ name: 'Your message', value: reason.slice(0, 1024) })
+        .setFooter({ text: `${BRAND_NAME} | Ticket System` })
+        .setTimestamp()
+    ]
+  }, 'ticket created notice');
+
+  if (!notified) {
+    // Their DMs are closed, so say it in the ticket instead.
+    await channel.send({
+      content:
+        `<@${interaction.user.id}> I could not DM you a confirmation. ` +
+        'Enable direct messages from server members if you want ticket updates.'
+    }).catch(() => {});
+  }
+
   await sendInteractionResult(interaction, {
     content: `Ticket opened: <#${channel.id}>`,
     flags: MessageFlags.Ephemeral
@@ -1460,7 +1507,9 @@ const DEFAULT_SECTIONS = [
 
 const STAFF_ROLE_NAME = 'Ticket Staff';
 const TICKET_CATEGORY_NAME = '🎫 TICKETS';
-const PANEL_CHANNEL_NAME = 'tickets';
+const SUPPORT_CATEGORY_NAME = 'Support Center';
+const PANEL_CHANNEL_NAME = 'create-ticket';
+const LOG_CHANNEL_NAME = 'tickets-log';
 
 const REQUIRED_BOT_PERMISSIONS = [
   ['Manage Channels', PermissionFlagsBits.ManageChannels],
@@ -1479,18 +1528,14 @@ function missingBotPermissions(guild) {
     .map(([label]) => label);
 }
 
-function ticketAreaOverwrites(guild, staffRoleId) {
+// A ticket category must stay invisible while it holds no tickets, so the staff
+// role deliberately gets NO overwrite here. Staff reach a ticket through the
+// ticket channel's own overwrite instead — and because Discord shows a category
+// to anyone who can see at least one channel inside it, the category surfaces
+// exactly when a ticket exists and disappears again when it is closed.
+function hiddenCategoryOverwrites(guild) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    {
-      id: staffRoleId,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-        PermissionFlagsBits.ManageMessages
-      ]
-    },
     {
       id: client.user.id,
       allow: [
@@ -1525,16 +1570,45 @@ async function ensureStaffRole(guild, providedRole, created) {
   return role;
 }
 
-async function ensureTicketCategory(guild, name, staffRoleId, created) {
+// Holds the public panel channel and the staff-only log channel. Left on
+// inherited permissions so members can see it: the panel inside is the entry
+// point to the whole system.
+async function ensureSupportCategory(guild, created) {
   const existing = guild.channels.cache.find(
-    (channel) => channel?.type === ChannelType.GuildCategory && channel.name === name
+    (channel) => channel?.type === ChannelType.GuildCategory && channel.name === SUPPORT_CATEGORY_NAME
   );
   if (existing) return existing;
 
   const category = await guild.channels.create({
+    name: SUPPORT_CATEGORY_NAME,
+    type: ChannelType.GuildCategory,
+    reason: `${BRAND_NAME} tickets: support category`
+  });
+
+  created.categories.push(SUPPORT_CATEGORY_NAME);
+  return category;
+}
+
+async function ensureTicketCategory(guild, name, created) {
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildCategory && channel.name === name
+  );
+
+  if (existing) {
+    // Re-apply the overwrites rather than trusting whatever is there. An earlier
+    // run may have granted the staff role blanket access, which would keep the
+    // category permanently visible instead of only while a ticket is open.
+    await existing.permissionOverwrites.set(
+      hiddenCategoryOverwrites(guild),
+      `${BRAND_NAME} tickets: keep category hidden while empty`
+    );
+    return existing;
+  }
+
+  const category = await guild.channels.create({
     name,
     type: ChannelType.GuildCategory,
-    permissionOverwrites: ticketAreaOverwrites(guild, staffRoleId),
+    permissionOverwrites: hiddenCategoryOverwrites(guild),
     reason: `${BRAND_NAME} tickets: ticket category`
   });
 
@@ -1542,7 +1616,7 @@ async function ensureTicketCategory(guild, name, staffRoleId, created) {
   return category;
 }
 
-async function ensurePanelChannel(guild, providedChannel, created) {
+async function ensurePanelChannel(guild, providedChannel, parentId, created) {
   if (providedChannel) return providedChannel;
 
   const existing = guild.channels.cache.find(
@@ -1554,6 +1628,7 @@ async function ensurePanelChannel(guild, providedChannel, created) {
   const channel = await guild.channels.create({
     name: PANEL_CHANNEL_NAME,
     type: ChannelType.GuildText,
+    parent: parentId,
     topic: `${BRAND_NAME} | Open a ticket from the menu below`,
     permissionOverwrites: [
       {
@@ -1579,6 +1654,50 @@ async function ensurePanelChannel(guild, providedChannel, created) {
   return channel;
 }
 
+// Closed tickets are deleted, so this is the only durable record of them.
+// Staff can read it; nobody but the bot can write to it.
+async function ensureLogChannel(guild, parentId, staffRoleId, created) {
+  const overwrites = [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    {
+      id: staffRoleId,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: [PermissionFlagsBits.SendMessages]
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.ReadMessageHistory
+      ]
+    }
+  ];
+
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildText && channel.name === LOG_CHANNEL_NAME
+  );
+
+  if (existing) {
+    await existing.permissionOverwrites.set(overwrites, `${BRAND_NAME} tickets: log channel access`);
+    return existing;
+  }
+
+  const channel = await guild.channels.create({
+    name: LOG_CHANNEL_NAME,
+    type: ChannelType.GuildText,
+    parent: parentId,
+    topic: `${BRAND_NAME} | Archive of every closed ticket`,
+    permissionOverwrites: overwrites,
+    reason: `${BRAND_NAME} tickets: log channel`
+  });
+
+  created.channels.push(channel.name);
+  return channel;
+}
+
 async function runQuickSetup(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -1594,27 +1713,24 @@ async function runQuickSetup(interaction) {
     return;
   }
 
-  const created = { roles: [], categories: [], channels: [] };
+  const created = { roles: [], categories: [], channels: [], removed: [] };
   const providedRole = interaction.options.getRole('staff_role');
   const providedChannel = interaction.options.getChannel('panel_channel');
   const singleCategory = interaction.options.getBoolean('single_category') ?? false;
 
   const staffRole = await ensureStaffRole(guild, providedRole, created);
+  const supportCategory = await ensureSupportCategory(guild, created);
 
-  // Default: one category per section, so a Store ticket opens under Store.
-  // Each category denies @everyone, so members never see it in the channel
-  // list. A ticket channel inside it carries its own overwrite allowing the
-  // opener, and Discord shows a hidden category to anyone who can see at
-  // least one channel in it -- so the member sees only their own ticket,
-  // while staff see the category with every ticket in it.
+  // Default: one category per section, so a Ban Appeal ticket opens under
+  // Ban Appeal. Every one of them is hidden until it actually holds a ticket.
   const sharedCategory = singleCategory
-    ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, staffRole.id, created)
+    ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, created)
     : null;
 
   const sections = [];
   for (const [index, template] of DEFAULT_SECTIONS.entries()) {
     const category = sharedCategory
-      || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, staffRole.id, created);
+      || await ensureTicketCategory(guild, `${template.emoji} ${template.name}`, created);
 
     sections.push({
       id: `${Date.now()}${index}`,
@@ -1625,7 +1741,8 @@ async function runQuickSetup(interaction) {
     });
   }
 
-  const panelChannel = await ensurePanelChannel(guild, providedChannel, created);
+  const panelChannel = await ensurePanelChannel(guild, providedChannel, supportCategory.id, created);
+  const logChannel = await ensureLogChannel(guild, supportCategory.id, staffRole.id, created);
 
   const existing = getGuildConfig(guild.id);
   const config = ensureTicketInstance({
@@ -1635,6 +1752,7 @@ async function runQuickSetup(interaction) {
       || 'Welcome to support.\nPick the category that matches your issue from the menu below, then describe it in detail.',
     color: existing?.color || BRAND_COLOR,
     sections,
+    logChannelId: logChannel.id,
     ticketCounter: Number(existing?.ticketCounter) || 2000
   });
 
@@ -1644,6 +1762,20 @@ async function runQuickSetup(interaction) {
   let panelMessage = null;
   if (existing?.messageId && existing.channelId === panelChannel.id) {
     panelMessage = await panelChannel.messages.fetch(existing.messageId).catch(() => null);
+  } else if (existing?.messageId && existing.channelId) {
+    // The panel moved. Delete the old one: it still carries a working menu,
+    // so leaving it would give members a second, unmanaged way in.
+    const oldChannel = await guild.channels.fetch(existing.channelId).catch(() => null);
+    const oldMessage = oldChannel?.isTextBased()
+      ? await oldChannel.messages.fetch(existing.messageId).catch(() => null)
+      : null;
+
+    if (oldMessage) {
+      await oldMessage.delete().catch((error) => {
+        console.error('Failed to remove the previous ticket panel:', error?.message || error);
+      });
+      created.removed.push(`old panel in #${oldChannel.name}`);
+    }
   }
 
   const panelPayload = {
@@ -1671,12 +1803,14 @@ async function runQuickSetup(interaction) {
       '',
       `Panel: <#${panelChannel.id}> (${panelReused ? 'updated in place' : 'posted'})`,
       `Staff role: <@&${staffRole.id}>`,
+      `Ticket log: <#${logChannel.id}>`,
       `Sections: ${sections.length}`,
       `Layout: ${singleCategory ? 'one shared category' : 'one hidden category per section'}`,
       '',
       line('Roles created', created.roles),
       line('Categories created', created.categories),
       line('Channels created', created.channels),
+      line('Cleaned up', created.removed),
       '',
       `Add your staff to <@&${staffRole.id}> so they get ticket access.`
     ].join('\n')
@@ -1794,15 +1928,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.commandName === 'ticket-close') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const channel = await fetchFreshTicketChannel(interaction);
-        const rename = await closeTicketChannel(channel);
-        if (!rename.ok) {
-          await interaction.editReply({
-            content: `Cannot close ticket. Discord did not rename the channel to ${rename.expectedName}.`
-          });
-          return;
-        }
+        const result = await closeAndArchiveTicket(channel, interaction.user.id);
 
-        await interaction.editReply({ content: 'Ticket closed. Use the Reopen button to open it again.' });
+        await channel
+          .send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0xffff00)
+                .setTitle('Ticket closed')
+                .setDescription(
+                  `Closed by <@${interaction.user.id}>.\n\n` +
+                  `This channel will be deleted in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds.`
+                )
+            ]
+          })
+          .catch(() => {});
+
+        await interaction.editReply({
+          content: result.logged.ok
+            ? `Ticket #${result.ticketNumber} archived to the log channel. The channel will be deleted shortly.`
+            : `Ticket #${result.ticketNumber} is being deleted, but no log channel is configured so nothing was archived. Run /quick-setup.`
+        });
         return;
       }
 
@@ -2027,6 +2173,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
             embeds: [embed],
             components: buildTicketControls('open', interaction.user.id)
           });
+
+          const claimTicketNumber = getTicketNumber(interaction.channel) || 'unknown';
+          await dmUser(getTicketOwnerId(interaction.channel), {
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0x2ecc71)
+                .setTitle(`Ticket #${claimTicketNumber} is being handled`)
+                .setDescription(
+                  `<@${interaction.user.id}> has claimed your ticket in ` +
+                  `**${interaction.guild.name}** and is working on it now.\n\n` +
+                  `Channel: <#${interaction.channel.id}>`
+                )
+                .setFooter({ text: `${BRAND_NAME} | Ticket System` })
+                .setTimestamp()
+            ]
+          }, 'ticket claimed notice');
+
+          await interaction.channel.send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0x2ecc71)
+                .setDescription(
+                  `Claimed by <@${interaction.user.id}>. This ticket is now under process.`
+                )
+            ]
+          }).catch(() => {});
           return;
         }
 
@@ -2034,84 +2206,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.deferUpdate();
           const channel = await fetchFreshTicketChannel(interaction);
 
-          const rename = await closeTicketChannel(channel);
-          if (!rename.ok) {
-            const currentClaimedBy = getTicketClaimedBy(channel) || claimedBy;
-            await interaction.message.edit({
-              components: buildTicketControls('open', currentClaimedBy)
-            });
-            await interaction.followUp({
-              content: `Cannot close ticket. Discord did not rename the channel to \`${rename.expectedName}\`.`,
-              flags: MessageFlags.Ephemeral
-            });
-            return;
-          }
+          await interaction.message
+            .edit({ components: buildTicketBusyControls('Closing...') })
+            .catch(() => {});
 
-          const currentClaimedBy = getTicketClaimedBy(channel) || claimedBy;
-          await interaction.message.edit({
-            components: buildTicketControls('closed', currentClaimedBy)
-          });
+          const result = await closeAndArchiveTicket(channel, interaction.user.id);
 
-          await channel.send({
-            embeds: buildClosedTicketEmbeds(interaction.user.id),
-            components: buildClosedTicketControls()
-          });
-          return;
-        }
-
-        if (interaction.customId === 'ticket:reopen') {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          const channel = await fetchFreshTicketChannel(interaction);
-          await interaction.editReply({ content: 'Opening ticket...' });
-
-          console.log(`Ticket reopen requested: ${channel.id} #${channel.name} by ${interaction.user.id}`);
-          const rename = await reopenTicketChannel(channel);
-          if (!rename.ok) {
-            await interaction.message.edit({
-              components: buildClosedTicketControls()
-            });
-            await interaction.editReply({
-              content: `Cannot reopen ticket. Discord did not rename the channel to \`${rename.expectedName}\`.`
-            });
-            return;
-          }
-
-          const reopenedChannel = rename.channel || channel;
-          const currentClaimedBy = getTicketClaimedBy(reopenedChannel) || claimedBy;
-          tryUpdatePinnedTicketControls(reopenedChannel, 'open', currentClaimedBy).then(() => {
-            console.log(`Ticket reopen controls refreshed: ${reopenedChannel.id} #${reopenedChannel.name}`);
-          });
-
-          await interaction.message.edit({
-            embeds: [buildClosedTicketSummaryEmbed(interaction.user.id)],
-            components: []
-          });
-          await reopenedChannel.send({
-            embeds: [buildOpenedTicketEmbed(interaction.user.id)]
-          });
-          await interaction.editReply({ content: 'Ticket opened.' });
-          return;
-        }
-
-        if (interaction.customId === 'ticket:transcript') {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          const channel = await fetchFreshTicketChannel(interaction);
-          const result = await sendTicketTranscript(channel);
-
-          await interaction.editReply({
-            content: `Transcript sent. Messages: ${result.totalMessages}. Delivered: ${result.delivered.length || 0}. Failed: ${result.failed.length || 0}.`
-          });
-          return;
-        }
-
-        if (interaction.customId === 'ticket:delete') {
-          await interaction.reply({ content: 'Deleting ticket channel in 3 seconds...', flags: MessageFlags.Ephemeral });
-          const channel = await fetchFreshTicketChannel(interaction);
-          setTimeout(() => {
-            channel.delete(`Ticket deleted by ${interaction.user.tag}`).catch((error) => {
-              console.error(`Failed to delete ticket channel ${channel.id}:`, error);
-            });
-          }, 3000);
+          await channel
+            .send({
+              embeds: [
+                new EmbedBuilder()
+                  .setColor(0xffff00)
+                  .setTitle('Ticket closed')
+                  .setDescription(
+                    `Closed by <@${interaction.user.id}>.\n` +
+                    (result.logged.ok
+                      ? 'A full archive has been saved to the ticket log.'
+                      : 'WARNING: no log channel is configured, so nothing was archived. Run /quick-setup.') +
+                    `\n\nThis channel will be deleted in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds.`
+                  )
+              ]
+            })
+            .catch(() => {});
           return;
         }
 
