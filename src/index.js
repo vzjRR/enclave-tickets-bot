@@ -270,7 +270,7 @@ function buildPanelEmbed(config) {
   const embed = new EmbedBuilder()
     .setColor(config.color || BRAND_COLOR)
     .setTitle(config.title || `${BRAND_NAME} - Ticket System`)
-    .setDescription(config.description || 'اختر القسم المناسب من القائمة لفتح تذكرة.')
+    .setDescription(config.description || 'Select the category that matches your issue to open a ticket.')
     .setFooter({ text: `${BRAND_NAME} | Ticket System` })
     .setTimestamp();
 
@@ -283,7 +283,7 @@ function buildPanelEmbed(config) {
 function buildPanelMenu(config) {
   const menu = new StringSelectMenuBuilder()
     .setCustomId('ticket:panel')
-    .setPlaceholder('اختر قسم التذكرة');
+    .setPlaceholder('Select a ticket category');
 
   for (const section of config.sections.slice(0, 25)) {
     const sectionEmoji = parseSectionEmoji(section.emoji);
@@ -291,7 +291,7 @@ function buildPanelMenu(config) {
       label: section.name.slice(0, 100),
       value: section.id,
       emoji: sectionEmoji?.menu,
-      description: `فتح تذكرة ${section.name}`.slice(0, 100)
+      description: `Open a ${section.name} ticket`.slice(0, 100)
     });
   }
 
@@ -341,7 +341,7 @@ function createPanelModal() {
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setMaxLength(256)
-          .setValue(`${BRAND_NAME} - نظام التذاكر`)
+          .setValue(`${BRAND_NAME} - Ticket System`)
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -350,7 +350,7 @@ function createPanelModal() {
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
           .setMaxLength(4000)
-          .setValue('مرحبا بك في نظام الدعم الفني.\nاختر القسم المناسب من القائمة بالأسفل واشرح مشكلتك بالتفصيل.')
+          .setValue('Welcome to support.\nPick the category that matches your issue from the menu below, then describe it in detail.')
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -410,7 +410,7 @@ function createReasonModal(sectionId) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('reason')
-          .setLabel('سبب فتح التذكرة')
+          .setLabel('Why are you opening this ticket?')
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
           .setMaxLength(1000)
@@ -498,15 +498,15 @@ function buildAdminPanel(channel) {
 
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
-    .setTitle('لوحة إدارة التذكرة')
-    .setDescription('هذه اللوحة خاصة بالإداريين، وجميع إجراءاتها محمية بفحص الصلاحيات.')
+    .setTitle('Ticket Admin Panel')
+    .setDescription('Staff only. Every action here re-checks your permissions before it runs.')
     .addFields(
-      { name: 'القناة', value: `#${channel.name}`, inline: true },
-      { name: 'الحالة', value: status === 'closed' ? 'مغلقة' : 'مفتوحة', inline: true },
-      { name: 'صاحب التذكرة', value: ownerId ? `<@${ownerId}>` : 'غير معروف', inline: true },
-      { name: 'المستلم', value: claimedBy ? `<@${claimedBy}>` : 'لم تُستلم', inline: true },
-      { name: 'التصنيف', value: channel.parent ? channel.parent.name : 'بدون تصنيف', inline: true },
-      { name: 'رقم التذكرة', value: getTicketNumber(channel) || 'غير معروف', inline: true }
+      { name: 'Channel', value: `#${channel.name}`, inline: true },
+      { name: 'Status', value: status === 'closed' ? 'Closed' : 'Open', inline: true },
+      { name: 'Opened by', value: ownerId ? `<@${ownerId}>` : 'Unknown', inline: true },
+      { name: 'Claimed by', value: claimedBy ? `<@${claimedBy}>` : 'Unclaimed', inline: true },
+      { name: 'Category', value: channel.parent ? channel.parent.name : 'No category', inline: true },
+      { name: 'Ticket number', value: getTicketNumber(channel) || 'Unknown', inline: true }
     )
     .setFooter({ text: `${BRAND_NAME} | Admin only` })
     .setTimestamp();
@@ -515,11 +515,11 @@ function buildAdminPanel(channel) {
     embeds: [embed],
     components: [
       new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('admin:edit').setLabel('الاسم والمعلومات').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('admin:move').setLabel('نقل التصنيف').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('admin:add-user').setLabel('إضافة عضو').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('admin:remove-user').setLabel('إزالة عضو').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('admin:refresh').setLabel('تحديث التذكرة').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId('admin:edit').setLabel('Name & Info').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('admin:move').setLabel('Move Category').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('admin:add-user').setLabel('Add Member').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('admin:remove-user').setLabel('Remove Member').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('admin:refresh').setLabel('Refresh Ticket').setStyle(ButtonStyle.Secondary)
       )
     ],
     flags: MessageFlags.Ephemeral
@@ -530,12 +530,12 @@ function createTicketEditModal(channel) {
   const infoMatch = channel.topic?.match(/info=([^|]*)/);
   return new ModalBuilder()
     .setCustomId('admin:edit-modal')
-    .setTitle('تعديل التذكرة')
+    .setTitle('Edit Ticket')
     .addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('name')
-          .setLabel('اسم قناة التذكرة')
+          .setLabel('Ticket channel name')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setMaxLength(80)
@@ -544,7 +544,7 @@ function createTicketEditModal(channel) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('info')
-          .setLabel('معلومات إدارية مختصرة')
+          .setLabel('Short staff note')
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(false)
           .setMaxLength(500)
@@ -557,7 +557,7 @@ function buildCategoryPicker() {
   return new ActionRowBuilder().addComponents(
     new ChannelSelectMenuBuilder()
       .setCustomId('admin:category')
-      .setPlaceholder('اختر التصنيف الجديد')
+      .setPlaceholder('Select the new category')
       .setChannelTypes(ChannelType.GuildCategory)
       .setMinValues(1)
       .setMaxValues(1)
@@ -568,7 +568,7 @@ function buildUserPicker(action) {
   return new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
       .setCustomId(`admin:${action}-user-select`)
-      .setPlaceholder(action === 'add' ? 'اختر عضوًا لإضافته' : 'اختر عضوًا لإزالته')
+      .setPlaceholder(action === 'add' ? 'Select a member to add' : 'Select a member to remove')
       .setMinValues(1)
       .setMaxValues(1)
   );
@@ -600,7 +600,7 @@ function buildTicketControls(status = 'open', claimedBy = null) {
         .setDisabled(isClosed),
       new ButtonBuilder()
         .setCustomId('ticket:admin-panel')
-        .setLabel('لوحة الإدارة')
+        .setLabel('Admin Panel')
         .setStyle(ButtonStyle.Secondary)
     )
   ];
@@ -1411,9 +1411,9 @@ async function openTicket(interaction, sectionId, reason) {
     .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${section.name}`)
     .setDescription(reason)
     .addFields(
-      { name: 'صاحب التذكرة', value: `<@${interaction.user.id}>`, inline: true },
-      { name: 'القسم', value: section.name, inline: true },
-      { name: 'تاريخ الفتح', value: `<t:${openedAt}:f>`, inline: true }
+      { name: 'Opened by', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'Category', value: section.name, inline: true },
+      { name: 'Opened at', value: `<t:${openedAt}:f>`, inline: true }
     )
     .setFooter({ text: `${BRAND_NAME} | Ticket System` })
     .setTimestamp();
@@ -1435,7 +1435,7 @@ async function openTicket(interaction, sectionId, reason) {
   });
 
   await sendInteractionResult(interaction, {
-    content: `تم فتح التذكرة: <#${channel.id}>`,
+    content: `Ticket opened: <#${channel.id}>`,
     flags: MessageFlags.Ephemeral
   });
 }
@@ -1450,12 +1450,12 @@ async function openTicket(interaction, sectionId, reason) {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SECTIONS = [
-  { name: 'استفسارات', emoji: '❓' },
-  { name: 'مشكلة تقنية', emoji: '⚠️' },
-  { name: 'شكوى ورقابة', emoji: '🕵️' },
-  { name: 'مراجعة باند', emoji: '⛔' },
-  { name: 'طلب تعويض', emoji: '💸' },
-  { name: 'المتجر', emoji: '💰' }
+  { name: 'Inquiries', emoji: '❓' },
+  { name: 'Technical Issue', emoji: '⚠️' },
+  { name: 'Reports', emoji: '🕵️' },
+  { name: 'Ban Appeal', emoji: '⛔' },
+  { name: 'Compensation', emoji: '💸' },
+  { name: 'Store', emoji: '💰' }
 ];
 
 const STAFF_ROLE_NAME = 'Ticket Staff';
@@ -1554,7 +1554,7 @@ async function ensurePanelChannel(guild, providedChannel, created) {
   const channel = await guild.channels.create({
     name: PANEL_CHANNEL_NAME,
     type: ChannelType.GuildText,
-    topic: `${BRAND_NAME} | اختر القسم المناسب من القائمة لفتح تذكرة`,
+    topic: `${BRAND_NAME} | Open a ticket from the menu below`,
     permissionOverwrites: [
       {
         id: guild.roles.everyone.id,
@@ -1587,8 +1587,8 @@ async function runQuickSetup(interaction) {
   if (missing.length) {
     await interaction.editReply({
       content: [
-        `لا أملك الصلاحيات التالية: **${missing.join(', ')}**`,
-        'أعد دعوة البوت بهذه الصلاحيات ثم أعد تشغيل الأمر.'
+        `I am missing these permissions: **${missing.join(', ')}**`,
+        'Re-invite the bot with those permissions, then run this command again.'
       ].join('\n')
     });
     return;
@@ -1597,13 +1597,19 @@ async function runQuickSetup(interaction) {
   const created = { roles: [], categories: [], channels: [] };
   const providedRole = interaction.options.getRole('staff_role');
   const providedChannel = interaction.options.getChannel('panel_channel');
-  const separateCategories = interaction.options.getBoolean('separate_categories') ?? false;
+  const singleCategory = interaction.options.getBoolean('single_category') ?? false;
 
   const staffRole = await ensureStaffRole(guild, providedRole, created);
 
-  const sharedCategory = separateCategories
-    ? null
-    : await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, staffRole.id, created);
+  // Default: one category per section, so a Store ticket opens under Store.
+  // Each category denies @everyone, so members never see it in the channel
+  // list. A ticket channel inside it carries its own overwrite allowing the
+  // opener, and Discord shows a hidden category to anyone who can see at
+  // least one channel in it -- so the member sees only their own ticket,
+  // while staff see the category with every ticket in it.
+  const sharedCategory = singleCategory
+    ? await ensureTicketCategory(guild, TICKET_CATEGORY_NAME, staffRole.id, created)
+    : null;
 
   const sections = [];
   for (const [index, template] of DEFAULT_SECTIONS.entries()) {
@@ -1624,41 +1630,55 @@ async function runQuickSetup(interaction) {
   const existing = getGuildConfig(guild.id);
   const config = ensureTicketInstance({
     ...(existing || {}),
-    title: existing?.title || `${BRAND_NAME} - نظام التذاكر`,
+    title: existing?.title || `${BRAND_NAME} - Ticket System`,
     description: existing?.description
-      || 'مرحبا بك في نظام الدعم الفني.\nاختر القسم المناسب من القائمة بالأسفل واشرح مشكلتك بالتفصيل.',
+      || 'Welcome to support.\nPick the category that matches your issue from the menu below, then describe it in detail.',
     color: existing?.color || BRAND_COLOR,
     sections,
     ticketCounter: Number(existing?.ticketCounter) || 2000
   });
 
-  const message = await panelChannel.send({
+  // Edit the existing panel in place when it is still present in the target
+  // channel. Posting unconditionally would leave a stale duplicate panel
+  // behind every time this command is re-run.
+  let panelMessage = null;
+  if (existing?.messageId && existing.channelId === panelChannel.id) {
+    panelMessage = await panelChannel.messages.fetch(existing.messageId).catch(() => null);
+  }
+
+  const panelPayload = {
     embeds: [buildPanelEmbed(config)],
     components: [buildPanelMenu(config)]
-  });
+  };
+
+  const panelReused = Boolean(panelMessage);
+  panelMessage = panelReused
+    ? await panelMessage.edit(panelPayload)
+    : await panelChannel.send(panelPayload);
 
   setGuildConfig(guild.id, {
     ...config,
     channelId: panelChannel.id,
-    messageId: message.id,
+    messageId: panelMessage.id,
     updatedAt: new Date().toISOString()
   });
 
-  const line = (label, items) => (items.length ? `${label}: ${items.join('، ')}` : `${label}: لا شيء جديد`);
+  const line = (label, items) => (items.length ? `${label}: ${items.join(', ')}` : `${label}: none`);
 
   await interaction.editReply({
     content: [
-      `تم إعداد نظام التذاكر في **${guild.name}**.`,
+      `Ticket system ready in **${guild.name}**.`,
       '',
-      `اللوحة: <#${panelChannel.id}>`,
-      `رتبة الطاقم: <@&${staffRole.id}>`,
-      `الأقسام: ${sections.length}`,
+      `Panel: <#${panelChannel.id}> (${panelReused ? 'updated in place' : 'posted'})`,
+      `Staff role: <@&${staffRole.id}>`,
+      `Sections: ${sections.length}`,
+      `Layout: ${singleCategory ? 'one shared category' : 'one hidden category per section'}`,
       '',
-      line('رتب أنشئت', created.roles),
-      line('تصنيفات أنشئت', created.categories),
-      line('قنوات أنشئت', created.channels),
+      line('Roles created', created.roles),
+      line('Categories created', created.categories),
+      line('Channels created', created.channels),
       '',
-      `أضف الإداريين إلى <@&${staffRole.id}> حتى تصلهم التذاكر.`
+      `Add your staff to <@&${staffRole.id}> so they get ticket access.`
     ].join('\n')
   });
 
@@ -1683,7 +1703,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       if (GUILD_MANAGER_COMMANDS.has(interaction.commandName) && !hasGuildManagerPermission(interaction)) {
         await interaction.reply({
-          content: 'تحتاج صلاحية إدارة السيرفر (Manage Server) لاستخدام هذا الأمر.',
+          content: 'You need the Manage Server permission to use this command.',
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -1739,18 +1759,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const result = await refreshGuildTickets(interaction.guild, `manual:${interaction.user.id}`);
         pruneSetupSessions();
         await interaction.editReply({
-          content: `تم تحديث التذاكر. الإجمالي: ${result.total}، الناجح: ${result.updated}، المتعذر: ${result.failed}.`
+          content: `Tickets refreshed. Total: ${result.total}, updated: ${result.updated}, failed: ${result.failed}.`
         });
         return;
       }
 
       if (interaction.commandName === 'ticket-admin') {
         if (!isTicketChannel(interaction.channel)) {
-          await interaction.reply({ content: 'يعمل هذا الأمر داخل قناة تذكرة فقط.', flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'This command only works inside a ticket channel.', flags: MessageFlags.Ephemeral });
           return;
         }
         if (!(await canManageTicket(interaction))) {
-          await interaction.reply({ content: 'لا تملك صلاحية إدارة هذه التذكرة.', flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
           return;
         }
         await interaction.reply(buildAdminPanel(interaction.channel));
@@ -1809,7 +1829,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const user = interaction.options.getUser('user', true);
         // Matches the admin panel guard: removing the owner orphans the ticket.
         if (user.id === getTicketOwnerId(interaction.channel)) {
-          await interaction.editReply({ content: 'لا يمكن إزالة صاحب التذكرة من التذكرة.' });
+          await interaction.editReply({ content: 'The ticket owner cannot be removed from their own ticket.' });
           return;
         }
         await deletePermissionOverwrite(
@@ -1871,7 +1891,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.customId === 'admin:edit-modal') {
         if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-          await interaction.reply({ content: 'لا تملك صلاحية إدارة هذه التذكرة.', flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
           return;
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -1883,7 +1903,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const freshChannel = await interaction.guild.channels.fetch(interaction.channelId, { force: true });
         await setTicketInfo(freshChannel, info);
-        await interaction.editReply({ content: `تم تحديث اسم ومعلومات التذكرة إلى #${newName}.` });
+        await interaction.editReply({ content: `Ticket renamed and info updated: #${newName}.` });
         return;
       }
 
@@ -1893,7 +1913,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const creationKey = `${interaction.guildId}:${interaction.user.id}`;
         if (ticketCreationLocks.has(creationKey)) {
           await interaction.reply({
-            content: 'يتم إنشاء تذكرتك الآن، انتظر لحظات.',
+            content: 'Your ticket is being created, one moment.',
             flags: MessageFlags.Ephemeral
           });
           return;
@@ -1942,7 +1962,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('admin:')) {
         if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-          await interaction.reply({ content: 'لا تملك صلاحية إدارة هذه التذكرة.', flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
           return;
         }
         if (interaction.customId === 'admin:edit') {
@@ -1950,21 +1970,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
         if (interaction.customId === 'admin:move') {
-          await interaction.reply({ content: 'اختر التصنيف الجديد للتذكرة:', components: [buildCategoryPicker()], flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'Select the new category for this ticket:', components: [buildCategoryPicker()], flags: MessageFlags.Ephemeral });
           return;
         }
         if (interaction.customId === 'admin:add-user') {
-          await interaction.reply({ content: 'اختر العضو المراد إضافته:', components: [buildUserPicker('add')], flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'Select the member to add:', components: [buildUserPicker('add')], flags: MessageFlags.Ephemeral });
           return;
         }
         if (interaction.customId === 'admin:remove-user') {
-          await interaction.reply({ content: 'اختر العضو المراد إزالته:', components: [buildUserPicker('remove')], flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: 'Select the member to remove:', components: [buildUserPicker('remove')], flags: MessageFlags.Ephemeral });
           return;
         }
         if (interaction.customId === 'admin:refresh') {
           await interaction.deferReply({ flags: MessageFlags.Ephemeral });
           const result = await refreshTicketChannel(await fetchFreshTicketChannel(interaction));
-          await interaction.editReply({ content: `تم تحديث التذكرة (${result.status === 'closed' ? 'مغلقة' : 'مفتوحة'}).` });
+          await interaction.editReply({ content: `Ticket refreshed (${result.status === 'closed' ? 'Closed' : 'Open'}).` });
           return;
         }
       }
@@ -1997,7 +2017,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           trySetTicketTopicValue(interaction.channel, 'claimedBy', interaction.user.id);
           const embed = updateTicketEmbed(interaction, (ticketEmbed) => {
             ticketEmbed.addFields({
-              name: 'تم الاستلام بواسطة',
+              name: 'Claimed by',
               value: `<@${interaction.user.id}>`,
               inline: true
             });
@@ -2096,7 +2116,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         await interaction.reply({
-          content: 'زر التذكرة غير معروف أو أن الرسالة قديمة. استخدم /tickets-refresh لتحديثها.',
+          content: 'Unknown ticket button, or this message is out of date. Run /tickets-refresh to rebuild it.',
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -2143,18 +2163,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isChannelSelectMenu() && interaction.customId === 'admin:category') {
       if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-        await interaction.reply({ content: 'لا تملك صلاحية إدارة هذه التذكرة.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
         return;
       }
       await interaction.deferUpdate();
       await withTimeout(interaction.channel.setParent(interaction.values[0], { lockPermissions: false }), `Move ticket ${interaction.channelId}`);
-      await interaction.editReply({ content: 'تم نقل التذكرة إلى التصنيف الجديد.', components: [] });
+      await interaction.editReply({ content: 'Ticket moved to the new category.', components: [] });
       return;
     }
 
     if (interaction.isUserSelectMenu() && interaction.customId.startsWith('admin:')) {
       if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-        await interaction.reply({ content: 'لا تملك صلاحية إدارة هذه التذكرة.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
         return;
       }
       const userId = interaction.values[0];
@@ -2166,14 +2186,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ReadMessageHistory: true,
           AttachFiles: true
         }, `Admin panel add member ${userId}`);
-        await interaction.editReply({ content: `تمت إضافة <@${userId}> إلى التذكرة.`, components: [] });
+        await interaction.editReply({ content: `Added <@${userId}> to this ticket.`, components: [] });
       } else {
         if (userId === getTicketOwnerId(interaction.channel)) {
-          await interaction.editReply({ content: 'لا يمكن إزالة صاحب التذكرة من لوحة الإدارة.', components: [] });
+          await interaction.editReply({ content: 'The ticket owner cannot be removed from their own ticket.', components: [] });
           return;
         }
         await deletePermissionOverwrite(interaction.channel, userId, `Admin panel remove member ${userId}`);
-        await interaction.editReply({ content: `تمت إزالة <@${userId}> من التذكرة.`, components: [] });
+        await interaction.editReply({ content: `Removed <@${userId}> from this ticket.`, components: [] });
       }
       return;
     }

@@ -71,11 +71,11 @@ Builds the entire ticket structure in one command:
 
 - Creates a **Ticket Staff** role, if you do not pass one. It is created with no
   guild-wide permissions — all of its access comes from channel overwrites.
-- Creates a **🎫 TICKETS** category, locked to `@everyone` and opened to the
-  staff role.
+- Creates **one hidden category per section** — `❓ Inquiries`, `⚠️ Technical
+  Issue`, `🕵️ Reports`, `⛔ Ban Appeal`, `💸 Compensation`, `💰 Store`. Each one
+  denies `@everyone`, so ordinary members never see it in the channel list.
 - Creates a **#tickets** channel that everyone can read but nobody can post in.
-- Seeds six sections (استفسارات, مشكلة تقنية, شكوى ورقابة, مراجعة باند,
-  طلب تعويض, المتجر) and publishes the panel.
+- Seeds the six sections and publishes the panel.
 
 Options:
 
@@ -83,10 +83,26 @@ Options:
 | --- | --- |
 | `staff_role` | Creates/reuses `Ticket Staff` |
 | `panel_channel` | Creates/reuses `#tickets` |
-| `separate_categories` | `false` — one shared category. Set `true` for one category per section |
+| `single_category` | `false` — one category per section. Set `true` to put every section in one shared `🎫 TICKETS` category |
 
 It is **idempotent**: roles, categories and channels are matched by name and
 reused, so running it twice will not duplicate anything.
+
+### How the hidden categories behave
+
+Each section category denies `ViewChannel` to `@everyone`, so a normal member
+sees nothing at all. When that member opens a Store ticket, the new channel
+carries its own overwrite allowing them — and Discord reveals a hidden category
+to anyone who can see at least one channel inside it. So:
+
+- **A member** sees the `💰 Store` category appear, containing only their own
+  ticket. Every other ticket, and every other category, stays invisible.
+- **Ticket Staff** see every section category and every ticket in them, and can
+  Claim and work any of them.
+- **Everyone else** sees no ticket categories at all.
+
+This is why the bot needs `Manage Roles`: those per-channel overwrites are what
+make the whole scheme work.
 
 Afterwards, add your staff to the **Ticket Staff** role. Edit the sections with
 `/ticket-section-add`, or re-run `/setup` for full manual control.

@@ -37,8 +37,8 @@ const commands = [
     )
     .addBooleanOption((option) =>
       option
-        .setName('separate_categories')
-        .setDescription('One category per section instead of a single shared category')
+        .setName('single_category')
+        .setDescription('Put every section in one shared category instead of one per section')
     ),
   new SlashCommandBuilder()
     .setName('ticket-panel')
