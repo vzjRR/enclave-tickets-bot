@@ -1,0 +1,20 @@
+{
+  "name": "enclave-tickets-bot",
+  "version": "1.0.0",
+  "description": "Enclave RP Discord ticket bot",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js",
+    "check": "node --check src/index.js && node --check src/deploy-commands.js && node --check src/storage.js",
+    "audit": "npm audit --audit-level=moderate"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.4.2"
+  }
+}
