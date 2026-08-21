@@ -1,0 +1,356 @@
+require('dotenv').config();
+
+// Drives the real bot code against the live guild in .env: provisions both
+// flows, opens a ticket in each, closes them, and asserts that each flow
+// behaves the way it is supposed to. Run with `npm run selftest`.
+//
+// It cleans up after itself. The modern flow deletes its own ticket by design;
+// classic tickets are removed explicitly at the end.
+
+const { Events, PermissionFlagsBits, ChannelType } = require('discord.js');
+const bot = require('./index.js');
+
+const {
+  client,
+  FLOW_NEW,
+  FLOW_CLASSIC,
+  flowMeta,
+  sectionFlow,
+  getTicketFlow,
+  provisionGuild,
+  createTicket,
+  closeAndArchiveTicket,
+  closeTicketChannel,
+  reopenTicketChannel,
+  getTicketOwnerId,
+  getTicketNumber,
+  trySetTicketTopicValue,
+  getGuildConfig,
+  TICKET_DELETE_DELAY_MS,
+  CLASSIC_CATEGORY_NAME,
+  SUPPORT_CATEGORY_NAME,
+  LOG_CHANNEL_NAME,
+  DEFAULT_SECTIONS
+} = bot;
+
+const GUILD_ID = process.env.GUILD_ID;
+
+let passed = 0;
+let failed = 0;
+const failures = [];
+const cleanup = [];
+
+function check(name, condition, detail = '') {
+  if (condition) {
+    console.log(`  PASS  ${name}`);
+    passed += 1;
+  } else {
+    console.log(`  FAIL  ${name}${detail ? '  -- ' + detail : ''}`);
+    failed += 1;
+    failures.push(name + (detail ? ' -- ' + detail : ''));
+  }
+}
+
+function section(title) {
+  console.log(`\n=== ${title} ===`);
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitFor(label, predicate, timeoutMs = 45_000, intervalMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await wait(intervalMs);
+  }
+  console.log(`        (timed out waiting for ${label} after ${timeoutMs}ms)`);
+  return false;
+}
+
+function canRoleSee(channel, roleId) {
+  const overwrite = channel.permissionOverwrites.cache.get(roleId);
+  return Boolean(overwrite && overwrite.allow.has(PermissionFlagsBits.ViewChannel));
+}
+
+function isDeniedForEveryone(channel, guild) {
+  const overwrite = channel.permissionOverwrites.cache.get(guild.roles.everyone.id);
+  return Boolean(overwrite && overwrite.deny.has(PermissionFlagsBits.ViewChannel));
+}
+
+async function run() {
+  const guild = await client.guilds.fetch(GUILD_ID);
+  await guild.channels.fetch();
+  await guild.roles.fetch();
+
+  console.log(`Guild: ${guild.name} (${guild.id})`);
+  const owner = await client.users.fetch(guild.ownerId);
+  console.log(`Ticket owner for this run: ${owner.username} (${owner.id})`);
+
+  // -------------------------------------------------------------------------
+  section('1. Provisioning both flows');
+  const result = await provisionGuild(guild, {});
+  await guild.channels.fetch();
+
+  check('provisioned a staff role', Boolean(result.staffRole?.id));
+  check('created Support Center', result.supportCategory?.name === SUPPORT_CATEGORY_NAME);
+  check('created the modern panel channel',
+    result.panelChannel?.name === flowMeta(FLOW_NEW).panelChannel,
+    `got ${result.panelChannel?.name}`);
+  check('created the classic panel channel',
+    result.classicPanelChannel?.name === flowMeta(FLOW_CLASSIC).panelChannel,
+    `got ${result.classicPanelChannel?.name}`);
+  check('created the log channel', result.logChannel?.name === LOG_CHANNEL_NAME);
+  check('panel channels live under Support Center',
+    result.panelChannel.parentId === result.supportCategory.id &&
+    result.classicPanelChannel.parentId === result.supportCategory.id);
+  check('log channel lives under Support Center',
+    result.logChannel.parentId === result.supportCategory.id);
+
+  const modernSections = result.sections.filter((s) => sectionFlow(s) === FLOW_NEW);
+  const classicSections = result.sections.filter((s) => sectionFlow(s) === FLOW_CLASSIC);
+  check(`${DEFAULT_SECTIONS.length} modern sections`, modernSections.length === DEFAULT_SECTIONS.length,
+    `got ${modernSections.length}`);
+  check(`${DEFAULT_SECTIONS.length} classic sections`, classicSections.length === DEFAULT_SECTIONS.length,
+    `got ${classicSections.length}`);
+  check('every section id is unique',
+    new Set(result.sections.map((s) => s.id)).size === result.sections.length);
+
+  const saved = getGuildConfig(guild.id);
+  check('modern panel persisted', Boolean(saved.channelId && saved.messageId));
+  check('classic panel persisted', Boolean(saved.classicChannelId && saved.classicMessageId));
+  check('log channel persisted', saved.logChannelId === result.logChannel.id);
+  check('the two panels are different messages', saved.messageId !== saved.classicMessageId);
+
+  // -------------------------------------------------------------------------
+  section('2. Visibility rules');
+  const staffRoleId = result.staffRole.id;
+
+  const modernCategory = await guild.channels.fetch(modernSections[0].categoryId);
+  check('modern category denies @everyone', isDeniedForEveryone(modernCategory, guild));
+  check('modern category grants staff NOTHING (invisible while empty)',
+    !canRoleSee(modernCategory, staffRoleId));
+
+  const classicCategory = guild.channels.cache.find(
+    (c) => c?.type === ChannelType.GuildCategory && c.name === CLASSIC_CATEGORY_NAME
+  );
+  check('classic category exists', Boolean(classicCategory));
+  check('classic category denies @everyone', isDeniedForEveryone(classicCategory, guild));
+  check('classic category IS visible to staff (original behaviour)',
+    canRoleSee(classicCategory, staffRoleId));
+
+  check('log channel denies @everyone', isDeniedForEveryone(result.logChannel, guild));
+  check('log channel is readable by staff', canRoleSee(result.logChannel, staffRoleId));
+
+  const everyonePanel = result.panelChannel.permissionOverwrites.cache.get(guild.roles.everyone.id);
+  check('panel channel is visible to everyone',
+    Boolean(everyonePanel?.allow.has(PermissionFlagsBits.ViewChannel)));
+  check('panel channel is read-only for everyone',
+    Boolean(everyonePanel?.deny.has(PermissionFlagsBits.SendMessages)));
+
+  // -------------------------------------------------------------------------
+  section('3. Modern flow: create -> claim -> close -> archived and deleted');
+  const modernSection = modernSections.find((s) => s.name === 'Store') || modernSections[0];
+  const modern = await createTicket({
+    guild,
+    user: owner,
+    section: modernSection,
+    reason: 'Self-test: modern flow ticket. Safe to ignore.',
+    config: getGuildConfig(guild.id)
+  });
+
+  check('modern ticket channel created', Boolean(modern?.channel?.id));
+  const modernChannel = modern.channel;
+  cleanup.push(modernChannel);
+
+  check('named ticket-<number>', /^ticket-\d+$/.test(modernChannel.name), modernChannel.name);
+  check('placed under its section category',
+    modernChannel.parentId === modernSection.categoryId);
+  check('topic records flow=new', getTicketFlow(modernChannel) === FLOW_NEW);
+  check('topic records the owner', getTicketOwnerId(modernChannel) === owner.id);
+  check('topic records the ticket number',
+    getTicketNumber(modernChannel) === String(modern.ticketNumber));
+  check('opener can see the channel', canRoleSee(modernChannel, owner.id));
+  check('staff role can see the channel', canRoleSee(modernChannel, staffRoleId));
+  check('@everyone denied on the channel', isDeniedForEveryone(modernChannel, guild));
+
+  // Pinning needs the separate PinMessages permission and is best-effort. What
+  // has to hold is that the controls stay findable, since close and refresh
+  // both go looking for them.
+  check('control message id recorded in the topic',
+    Boolean(bot.getTicketControlMessageId(modernChannel)));
+  const control = await bot.findTicketControlMessage(modernChannel);
+  check('control message is resolvable', Boolean(control));
+  check('control message carries the Claim button',
+    Boolean(control?.components?.[0]?.components?.some((c) => c.customId === 'ticket:claim')));
+
+  const pinnedOk = await modernChannel.messages.fetchPins()
+    .then((p) => p.items.length > 0)
+    .catch(() => false);
+  console.log(`        (pinned: ${pinnedOk}; PinMessages missing: ` +
+    `${bot.missingOptionalBotPermissions(guild).join(', ') || 'no'})`);
+
+  const rebuilt = await bot.updatePinnedTicketControls(modernChannel, 'open', null);
+  check('controls can be rebuilt without pins', Boolean(rebuilt));
+
+  // The claim button needs a real interaction; the durable half of claiming is
+  // the topic write, so that is what gets asserted here.
+  await trySetTicketTopicValue(modernChannel, 'claimedBy', client.user.id);
+  const claimedChannel = await guild.channels.fetch(modernChannel.id, { force: true });
+  check('claim is recorded in the topic',
+    bot.getTicketClaimedBy(claimedChannel) === client.user.id);
+
+  const logChannel = await guild.channels.fetch(result.logChannel.id);
+  const logBefore = (await logChannel.messages.fetch({ limit: 20 })).size;
+
+  const modernTicketNumber = modern.ticketNumber;
+  await closeAndArchiveTicket(claimedChannel, client.user.id);
+
+  const logAfter = await logChannel.messages.fetch({ limit: 20 });
+  check('an archive was written to the log channel', logAfter.size > logBefore,
+    `${logBefore} -> ${logAfter.size}`);
+
+  const archive = logAfter.find((m) =>
+    m.embeds[0]?.title === `Ticket #${modernTicketNumber} closed`);
+  check('archive names the right ticket', Boolean(archive));
+  check('archive carries a transcript attachment', Boolean(archive && archive.attachments.size > 0));
+  if (archive) {
+    const fields = Object.fromEntries(archive.embeds[0].fields.map((f) => [f.name, f.value]));
+    check('archive records who opened it', (fields['Opened by'] || '').includes(owner.id));
+    check('archive records who closed it', (fields['Closed by'] || '').includes(client.user.id));
+    check('archive records the section', fields.Section === modernSection.name);
+    check('archive records how long it was open', Boolean(fields['Open for']));
+  }
+
+  console.log(`        waiting ${TICKET_DELETE_DELAY_MS / 1000}s for the scheduled deletion...`);
+  const deleted = await waitFor('modern channel deletion', async () => {
+    const still = await guild.channels.fetch(modernChannel.id).catch(() => null);
+    return still === null;
+  }, TICKET_DELETE_DELAY_MS + 20_000, 2_000);
+  check('modern ticket channel was deleted on close', deleted);
+
+  // -------------------------------------------------------------------------
+  section('4. Classic flow: create -> close -> renamed and kept -> reopen');
+  const classicSection = classicSections.find((s) => s.name === 'Ban Appeal') || classicSections[0];
+  const classic = await createTicket({
+    guild,
+    user: owner,
+    section: classicSection,
+    reason: 'Self-test: classic flow ticket. Safe to ignore.',
+    config: getGuildConfig(guild.id)
+  });
+
+  check('classic ticket channel created', Boolean(classic?.channel?.id));
+  const classicChannel = classic.channel;
+  cleanup.push(classicChannel);
+
+  check('topic records flow=classic', getTicketFlow(classicChannel) === FLOW_CLASSIC);
+  check('placed under the shared classic category',
+    classicChannel.parentId === classicCategory.id);
+  check('classic ticket number differs from the modern one',
+    classic.ticketNumber !== modernTicketNumber,
+    `${classic.ticketNumber} vs ${modernTicketNumber}`);
+
+  // Checked while the classic ticket is still open: the per-flow scoping is
+  // what lets one member exercise both panels at once.
+  section('5. Flows are independent');
+  const openClassic = await bot.findExistingMemberTicket(
+    guild, owner.id, getGuildConfig(guild.id), FLOW_CLASSIC
+  );
+  check('the open classic ticket is found for the member', Boolean(openClassic));
+  const noModern = await bot.findExistingMemberTicket(
+    guild, owner.id, getGuildConfig(guild.id), FLOW_NEW
+  );
+  check('the closed modern ticket does not block a new one', noModern === null);
+
+  section('6. Classic close and reopen');
+  const classicNumber = classic.ticketNumber;
+  await closeTicketChannel(classicChannel);
+
+  const closedConfig = getGuildConfig(guild.id);
+  check('closed id recorded in storage',
+    (closedConfig.closedTicketIds || []).includes(classicChannel.id));
+
+  const renamed = await waitFor(`rename to closed-${classicNumber}`, async () => {
+    const fresh = await guild.channels.fetch(classicChannel.id, { force: true }).catch(() => null);
+    return fresh?.name === `closed-${classicNumber}`;
+  });
+  check(`renamed to closed-${classicNumber}`, renamed);
+
+  const afterClose = await guild.channels.fetch(classicChannel.id).catch(() => null);
+  check('classic channel still EXISTS after close (not deleted)', afterClose !== null);
+  if (afterClose) {
+    const ownerOverwrite = afterClose.permissionOverwrites.cache.get(owner.id);
+    check("opener's access was revoked",
+      Boolean(ownerOverwrite?.deny.has(PermissionFlagsBits.ViewChannel)));
+  }
+
+  // This channel has now been renamed once. Discord allows roughly two renames
+  // per ten minutes per channel, so the reopen rename is very likely to be
+  // deferred. That is the documented weakness of the classic flow, not a
+  // failure, so what gets asserted is the part that must be immediate --
+  // permissions and stored state -- plus the fact that a retry was queued.
+  await reopenTicketChannel(afterClose);
+
+  const afterReopen = await guild.channels.fetch(classicChannel.id, { force: true }).catch(() => null);
+  check("opener's access was restored immediately", afterReopen && canRoleSee(afterReopen, owner.id));
+
+  const reopenedConfig = getGuildConfig(guild.id);
+  check('closed id cleared from storage',
+    !(reopenedConfig.closedTicketIds || []).includes(classicChannel.id));
+
+  const pending = reopenedConfig.pendingRenames || {};
+  const renamedBack = await waitFor(`rename back to ticket-${classicNumber}`, async () => {
+    const fresh = await guild.channels.fetch(classicChannel.id, { force: true }).catch(() => null);
+    return fresh?.name === `ticket-${classicNumber}`;
+  }, 30_000);
+
+  check('reopen either renamed back or queued a durable retry',
+    renamedBack || Boolean(pending[classicChannel.id]),
+    renamedBack ? '' : 'no rename applied and nothing queued');
+
+  if (!renamedBack) {
+    console.log(`        rename deferred by Discord's rate limit; queued as ` +
+      `${JSON.stringify(pending[classicChannel.id])}`);
+  }
+}
+
+async function main() {
+  console.log('Enclave Tickets self-test\n');
+
+  try {
+    await run();
+  } catch (error) {
+    console.error('\nSELF-TEST ABORTED:', error?.stack || error);
+    failed += 1;
+    failures.push('aborted: ' + (error?.message || error));
+  }
+
+  section('Cleanup');
+  for (const channel of cleanup) {
+    const live = await channel.guild.channels.fetch(channel.id).catch(() => null);
+    if (!live) {
+      console.log(`  already gone: ${channel.id}`);
+      continue;
+    }
+    await live.delete('Enclave Tickets self-test cleanup').then(
+      () => console.log(`  deleted #${live.name}`),
+      (e) => console.log(`  could not delete ${live.id}: ${e?.message || e}`)
+    );
+  }
+
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`${passed} passed, ${failed} failed`);
+  if (failures.length) {
+    console.log('\nFailures:');
+    for (const f of failures) console.log('  - ' + f);
+  }
+  console.log('='.repeat(50));
+
+  await client.destroy().catch(() => {});
+  process.exit(failed ? 1 : 0);
+}
+
+client.once(Events.ClientReady, () => {
+  // Let the bot's own startup work settle before touching the guild.
+  setTimeout(() => { main(); }, 2_000);
+});

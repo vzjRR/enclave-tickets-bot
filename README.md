@@ -1,9 +1,38 @@
-# Enclave RP Ticket Bot
+# Enclave Tickets
 
-Discord ticket bot for the **Enclave RP** server. Members open a ticket from a
-panel in `#create-ticket`; the bot creates a private channel under the matching
-section category, notifies the member by DM, and lets staff claim and resolve
-it. Closing a ticket archives it to a log channel and deletes the channel.
+A Discord ticket bot that runs **two different ticket lifecycles side by side in
+the same server**, so they can be compared directly on real traffic:
+
+- **🎫 Modern Flow** — categories that stay invisible until a ticket exists, DM
+  notifications to the member, and closing archives the ticket to a log channel
+  and deletes the channel.
+- **🗂️ Classic Flow** — the original AbuFaisal behaviour: a staff-visible
+  category, no DMs, and closing renames the channel to `closed-<number>` and
+  keeps it in place with Transcript / Open / Delete controls.
+
+Each ticket records which flow it belongs to in its channel topic, and every
+lifecycle decision branches on that.
+
+## The two flows compared
+
+| | 🎫 Modern | 🗂️ Classic |
+| --- | --- | --- |
+| Panel channel | `#create-ticket` | `#create-ticket-classic` |
+| Categories | One hidden category per section | One shared, staff-visible category |
+| Category visible when idle | No — invisible to everyone | Yes, to staff |
+| Member notified on create | DM with their reason and a link | Nothing |
+| Member notified on claim | DM: "under process", names the staff member | Nothing |
+| Closing | Archives to `#tickets-log`, deletes the channel | Renames to `closed-<number>`, keeps it |
+| After close | Channel gone; log entry is the record | Channel is the record |
+| Reopen | Not possible — open a new ticket | Yes, renames back and restores access |
+| Transcript | Written to the log automatically | On demand, DMed |
+| Depends on renames | No | Yes — and Discord rate-limits them |
+
+The last row is the substantive difference. Discord allows roughly **two channel
+renames per ten minutes per channel**, and the classic flow puts a rename on the
+critical path of both closing and reopening. The retry queue exists to absorb
+that: renames are queued, retried with backoff, persisted to disk, and resumed
+after a restart. The modern flow takes renames off that path entirely.
 
 ## Requirements
 
@@ -12,159 +41,105 @@ it. Closing a ticket archives it to a log channel and deletes the channel.
 
 ## Setup
 
-1. Install dependencies:
+1. `npm ci`
+2. Copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `CLIENT_ID`
+   (and `GUILD_ID` for instant command registration while testing).
+3. Invite the bot — see **Bot permissions**.
+4. `npm run deploy` to register the slash commands.
+5. `npm start`
+6. In Discord, run **`/quick-setup`**. That builds both flows.
 
-   ```powershell
-   npm ci
-   ```
+On Windows, `start-bot.bat` installs packages, registers commands on first run,
+and restarts the bot if it exits. `deploy-commands.bat` forces a re-register.
 
-2. Copy `.env.example` to `.env` and fill it in:
-
-   ```env
-   DISCORD_TOKEN=your_bot_token
-   CLIENT_ID=your_application_client_id
-   GUILD_ID=optional_test_guild_id
-   ```
-
-   Never commit `.env` or share the token. If it leaks, regenerate it
-   immediately in the Developer Portal — a leaked bot token gives full control
-   of the bot.
-
-3. Invite the bot (see **Bot permissions** below).
-
-4. Register the slash commands (once, and again whenever they change):
-
-   ```powershell
-   npm run deploy
-   ```
-
-5. Start the bot:
-
-   ```powershell
-   npm start
-   ```
-
-6. In Discord, run **`/quick-setup`**. That is all — see below.
-
-On Windows you can just run `start-bot.bat`, which installs packages, registers
-commands on first run, and restarts the bot if it exits. `deploy-commands.bat`
-forces a command re-registration.
+Never commit `.env` or share the token. If it leaks, regenerate it in the
+Developer Portal — a leaked bot token gives full control of the bot.
 
 ## Bot permissions
 
-Invite the bot with exactly these:
-
 `Manage Channels`, `Manage Roles`, `View Channels`, `Send Messages`,
-`Manage Messages`, `Embed Links`, `Attach Files`, `Read Message History`
+`Manage Messages`, `Embed Links`, `Attach Files`, `Read Message History`,
+`Pin Messages`
 
-That is permissions integer **`268561424`**.
+That is permissions integer **`2251800082246672`**.
 
-`Manage Roles` is required — every ticket channel is private, and creating or
-editing a channel permission overwrite needs it. Without it, ticket creation
-fails. The bot does **not** need `Mention Everyone` and does **not** need
+Two of these are easy to miss:
+
+- **`Manage Roles`** is required. Every ticket channel is private, and creating
+  or editing a channel permission overwrite needs it. Without it, ticket
+  creation fails outright.
+- **`Pin Messages`** is a *separate* permission — Discord split it out of
+  `Manage Messages`, so an invite generated before that change does not include
+  it and every pin returns 403. The bot handles this: it records the control
+  message id in the channel topic and only falls back to pins, so tickets work
+  either way. You just lose the pin. `/quick-setup` reports it if missing.
+
+The bot does **not** need `Mention Everyone` and does **not** need
 `Administrator`.
 
-## Getting the server ready
+## `/quick-setup`
 
-### `/quick-setup` (recommended)
-
-Builds the entire structure in one command:
+Builds everything in one command:
 
 ```
 Support Center                 visible to everyone
-  ├── #create-ticket           everyone can read and use the menu, nobody can post
-  └── #tickets-log             staff can read, only the bot can post
+  ├── #create-ticket           modern panel
+  ├── #create-ticket-classic   classic panel
+  └── #tickets-log             staff read-only, bot writes
 
-❓ Inquiries                    hidden — appears only while it holds a ticket
-⚠️ Technical Issue              hidden
-🕵️ Reports                      hidden
-⛔ Ban Appeal                   hidden
-💸 Compensation                 hidden
-💰 Store                        hidden
+❓ Inquiries          hidden — modern, appears only while holding a ticket
+⚠️ Technical Issue    hidden — modern
+🕵️ Reports            hidden — modern
+⛔ Ban Appeal         hidden — modern
+💸 Compensation       hidden — modern
+💰 Store              hidden — modern
+
+🗂️ Classic Tickets    staff-visible — every classic section lives here
 ```
 
-It also creates a **Ticket Staff** role if you do not pass one. That role is
-created with *no* guild-wide permissions — all of its access comes from channel
-overwrites.
-
-Options:
+It also creates a **Ticket Staff** role if you do not pass one, with *no*
+guild-wide permissions — all of its access comes from channel overwrites.
 
 | Option | Default |
 | --- | --- |
 | `staff_role` | Creates/reuses `Ticket Staff` |
 | `panel_channel` | Creates/reuses `#create-ticket` under `Support Center` |
-| `single_category` | `false` — one category per section. Set `true` to put every section in one shared `🎫 TICKETS` category |
+| `single_category` | `false` — one modern category per section. `true` puts them all in one shared `🎫 TICKETS` category |
 
 It is **idempotent**: roles, categories and channels are matched by name and
-reused, the panel message is edited in place rather than reposted, and category
-permissions are re-applied on every run. If you move the panel to a different
-channel, the old panel message is deleted so members cannot use a stale menu.
+reused, panel messages are edited in place, category permissions are re-applied
+on every run, and panel presentation is reset to the flow defaults. If a panel
+moves channels, the old message is deleted so members cannot use a stale menu.
 
 ### How the hidden categories work
 
-Each section category denies `ViewChannel` to `@everyone` **and grants nothing
-to the staff role**. On its own, that makes the category invisible to everyone.
+A modern section category denies `ViewChannel` to `@everyone` **and grants the
+staff role nothing**. On its own that makes it invisible to everybody.
 
-When a ticket is created, the new channel carries its own overwrites allowing
-the member who opened it and the section's staff roles. Discord reveals a
-category to anyone who can see at least one channel inside it, so:
+When a ticket opens, the new channel carries its own overwrites allowing the
+member and the section's staff roles. Discord reveals a category to anyone who
+can see at least one channel inside it, so:
 
-- **While no ticket is open**, the category is invisible to everybody.
-- **When a Ban Appeal ticket opens**, `⛔ Ban Appeal` appears for staff, showing
-  `ticket-2002`. Any staff member can claim it and work it.
-- **The member who opened it** sees only that category, containing only their
-  own ticket.
-- **When it is closed**, the channel is deleted and the category goes back to
-  being invisible.
+- **Idle** — invisible to everyone.
+- **A Ban Appeal ticket opens** — `⛔ Ban Appeal` appears for staff showing
+  `ticket-2011`, and any staff member can claim it.
+- **The member** sees only that category, holding only their own ticket.
+- **On close** — the channel is deleted and the category disappears again.
 
-This is why the bot needs `Manage Roles`: those per-channel overwrites are the
-entire mechanism.
-
-### `/setup` (manual)
-
-Run it in the channel where the panel should be posted. The bot opens a modal
-for the main embed (title, description, colour, thumbnail, main image), then
-**Add Section** for each category — section name and emoji in a modal, then a
-category select menu, then a role select menu. Press **Publish Panel** when
-done.
-
-Note `/setup` points sections at categories you pick yourself, so it does not
-apply the hidden-category permissions that `/quick-setup` does.
-
-## Ticket lifecycle
-
-1. A member picks a section in `#create-ticket` and gives a reason.
-2. The bot creates `ticket-<number>` under that section's category, private to
-   the member and the section's staff roles.
-3. The member gets a **DM** confirming the ticket, with the reason they gave and
-   a link to the channel. If their DMs are closed, the bot says so in the ticket
-   instead.
-4. The first message in the channel pings the staff roles and the member, then
-   pins itself. It carries **Claim**, **Close & Delete**, and **Admin Panel**.
-5. When a staff member clicks **Claim**, the member gets a second **DM** telling
-   them their ticket is under process and who took it, and a note is posted in
-   the channel.
-6. **Close & Delete** writes a full archive to `#tickets-log`, DMs the member
-   that the ticket was closed, and deletes the channel 10 seconds later.
-
-One open ticket per member at a time. Ticket state lives in the channel topic
-(`owner=`, `status=`, `claimedBy=`, `ticketNumber=`); panel configuration lives
-in `data/tickets.json`.
+The classic category is deliberately *not* hidden this way: it stays visible to
+staff, which is how the original behaved, and closed tickets accumulate in it as
+`closed-<number>`.
 
 ## The ticket log
 
-Because closed tickets are deleted, `#tickets-log` is the only durable record.
-Each entry is an embed plus a `.txt` transcript attachment, recording:
+Modern tickets are deleted on close, so `#tickets-log` is their only durable
+record. Each entry is an embed plus a `.txt` transcript attachment recording
+section, channel name, ticket number, message count, who opened / claimed /
+closed it with their ids, opened and closed timestamps, how long it stayed open,
+and the reason the member gave.
 
-- Section, channel name, ticket number, message count
-- Who opened it, who claimed it (or "Never claimed"), who closed it — with IDs
-- Opened at, closed at, and how long it stayed open
-- The reason the member gave when opening it
-- A full transcript of every message
-
-Transcripts include author, timestamp and attachment URLs. Message **text**
-requires the Message Content intent (below); without it every line reads
-`[no text content]` and the transcript header says so.
+Message **text** requires the Message Content intent (below); without it each
+line reads `[no text content]` and the transcript header says so.
 
 ## Configuration
 
@@ -172,70 +147,65 @@ requires the Message Content intent (below); without it every line reads
 | --- | --- | --- |
 | `DISCORD_TOKEN` | — | Bot token. Required. |
 | `CLIENT_ID` | — | Application ID. Required for command registration. |
-| `GUILD_ID` | empty | Register commands to one guild instantly. Empty registers globally (up to 1 hour to propagate). |
-| `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Automatic maintenance sweep. Minimum 5. |
-| `ENABLE_MESSAGE_CONTENT` | `false` | See below. |
+| `GUILD_ID` | empty | Register commands to one guild instantly. Empty registers globally. |
+| `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
+| `ENABLE_MESSAGE_CONTENT` | `false` | Privileged intent; see below. |
+| `TRANSCRIPT_SEND_TO_OWNER` | `true` | Classic-flow transcripts go to the member as well as the claiming staff member. |
 
 ### Message Content intent
-
-Transcripts can only include message **text** if the privileged Message Content
-intent is on. To enable it:
 
 1. Developer Portal → your app → **Bot** → **Privileged Gateway Intents** →
    enable **Message Content Intent**.
 2. Set `ENABLE_MESSAGE_CONTENT=true` in `.env`.
 
-Leave both off and the bot still runs — logs just record authors, timestamps and
-attachments. Requesting the intent in code without enabling it in the portal
-makes login fail, which is why it is opt-in.
+Requesting the intent in code without enabling it in the portal makes login
+fail, which is why it is opt-in. Leave it off and the bot still runs.
 
 ## Commands
 
 | Command | Who can use it |
 | --- | --- |
 | `/quick-setup` | Manage Server |
-| `/setup` | Manage Server |
-| `/ticket-panel` | Manage Server |
-| `/ticket-section-add` | Manage Server |
-| `/tickets-refresh` | Manage Server |
+| `/setup`, `/ticket-panel`, `/ticket-section-add`, `/tickets-refresh` | Manage Server |
 | `/ticket-admin` | Manage Messages or Manage Channels in the ticket |
 | `/ticket-close` | Ticket staff, **or** the member who opened the ticket |
 | `/ticket-add`, `/ticket-remove`, `/ticket-rename` | Ticket staff |
 
-`/ticket-close` archives and deletes, exactly like the button.
+`/ticket-close` follows the ticket's own flow: archive-and-delete for modern,
+rename-and-keep for classic.
 
 Every one of these is re-checked inside the bot. Discord's "default member
 permissions" are only a default that a server admin can override per role, so
 the code does not rely on them alone.
 
-## Admin panel
+## Self-test
 
-The pinned ticket message has an **Admin Panel** button, and `/ticket-admin`
-opens the same panel. It is ephemeral, and every action re-checks that the
-clicker has `Manage Messages` or `Manage Channels` **in that channel** before
-changing anything. From it staff can rename the ticket, add a staff note, move
-it to another category, and add or remove members.
+```powershell
+npm run selftest
+```
 
-Note this is a ticket-staff gate, not an Administrator gate — any role you grant
-those permissions on a ticket channel can use the panel there. Section staff
-roles get `Manage Messages` on their own tickets by design.
+Drives the real code paths against the guild in `.env`: provisions both flows,
+asserts the structure and every permission rule, opens a ticket in each flow,
+claims and closes them, and checks that the modern one was archived and deleted
+while the classic one was renamed and kept. It cleans up after itself.
 
-## Maintenance
-
-- A sweep runs every `TICKET_REFRESH_INTERVAL_MINUTES` (default 30). It resumes
-  interrupted channel renames, refreshes pinned controls, reconciles ticket
-  status, and drops references to deleted tickets.
-- `/tickets-refresh` runs the same sweep on demand.
-- Channel renames are rate-limited by Discord to roughly 2 per 10 minutes per
-  channel, so a rename may take a few minutes to show. Renames are queued,
-  retried, and survive a restart.
+58 assertions. Note it will open and close real tickets in that guild and send
+DMs to the guild owner, so point it at a test server.
 
 ## Data and backups
 
-All persistent state is `data/tickets.json` — panel config, sections, the log
-channel id, the ticket counter, and pending renames. It is written atomically
-(temp file + rename) and a `.bak` copy is kept, which the bot recovers from
-automatically if the primary file is ever corrupt.
+All persistent state is `data/tickets.json` — panel config for both flows,
+sections, the log channel id, the ticket counter, and pending renames. It is
+written atomically (temp file + rename) with a `.bak` copy the bot recovers from
+automatically if the primary file is corrupt.
 
 `data/` is gitignored. **Back it up separately.** Losing it means re-running
 `/quick-setup` and losing the ticket counter.
+
+## A note on `@everyone`
+
+The original implementation pinged `@everyone` on every ticket creation. That is
+deliberately **not** reproduced in either flow here: ticket creation is
+member-triggered, so it let any member force a server-wide notification. Both
+flows mention the responsible staff roles and the ticket owner instead. It is
+the one place where the classic flow intentionally diverges from the original.
