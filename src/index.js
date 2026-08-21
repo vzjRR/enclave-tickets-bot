@@ -884,14 +884,27 @@ function getTicketNumber(channel) {
   return nameMatch?.[1] || null;
 }
 
+// The topic holds several independent keys, so every write is a merge. It has
+// to merge against what is actually on the channel right now: the maintenance
+// sweep writes status= from a channel list it fetched earlier, and if a member
+// was claimed in between, writing a stale topic back would silently drop
+// claimedBy. Re-reading first makes the last writer merge instead of clobber.
 async function setTicketTopicValue(channel, key, value) {
-  const topic = channel.topic || TICKET_MARKER;
+  const fresh = await channel.guild.channels
+    .fetch(channel.id, { force: true })
+    .catch(() => channel);
+
+  const topic = fresh.topic || TICKET_MARKER;
   const pair = `${key}=${value}`;
   const nextTopic = topic.includes(`${key}=`)
     ? topic.replace(new RegExp(`${key}=[^|]+`), pair)
     : `${topic} | ${pair}`;
 
-  await channel.setTopic(nextTopic.slice(0, 1024));
+  // Channel edits are capped at roughly two per ten minutes, so never spend
+  // one writing a topic that already says this.
+  if (nextTopic === fresh.topic) return;
+
+  await fresh.setTopic(nextTopic.slice(0, 1024));
 }
 
 async function trySetTicketTopicValue(channel, key, value) {
@@ -2452,7 +2465,16 @@ async function provisionGuild(guild, options = {}) {
   if (!useModern && !useClassic) throw new Error('No ticket flows are enabled.');
 
   const staffRole = await ensureStaffRole(guild, options.staffRole || null, created);
-  const supportCategory = await ensureSupportCategory(guild, created);
+
+  // Only needed as a parent for channels this run actually creates.
+  const needsSupportCategory =
+    (useModern && !options.panelChannel) ||
+    (useClassic && !options.classicPanelChannel) ||
+    !options.logChannel;
+  const supportCategory = needsSupportCategory
+    ? await ensureSupportCategory(guild, created)
+    : null;
+
   const sections = [];
   const ticketCategoryIds = [];
   const stamp = Date.now();
@@ -2495,14 +2517,15 @@ async function provisionGuild(guild, options = {}) {
     }
   }
 
+  const supportCategoryId = supportCategory?.id ?? null;
   const panelChannel = useModern
-    ? await ensurePanelChannel(guild, options.panelChannel || null, FLOW_NEW, supportCategory.id, created)
+    ? await ensurePanelChannel(guild, options.panelChannel || null, FLOW_NEW, supportCategoryId, created)
     : null;
   const classicPanelChannel = useClassic
-    ? await ensurePanelChannel(guild, options.classicPanelChannel || null, FLOW_CLASSIC, supportCategory.id, created)
+    ? await ensurePanelChannel(guild, options.classicPanelChannel || null, FLOW_CLASSIC, supportCategoryId, created)
     : null;
   const logChannel = await ensureLogChannel(
-    guild, supportCategory.id, staffRole.id, created, options.logChannel || null
+    guild, supportCategoryId, staffRole.id, created, options.logChannel || null
   );
 
   // Existing channels get additive permission fixes only.
@@ -2513,7 +2536,11 @@ async function provisionGuild(guild, options = {}) {
 
   const anchorId = options.anchorCategoryId || ANCHOR_CATEGORY_ID;
   const positioned = anchorId
-    ? await positionCategoriesAbove(guild, [supportCategory.id, ...ticketCategoryIds], anchorId)
+    ? await positionCategoriesAbove(
+        guild,
+        [supportCategoryId, ...ticketCategoryIds].filter(Boolean),
+        anchorId
+      )
     : null;
 
   if (positioned && !positioned.ok) {

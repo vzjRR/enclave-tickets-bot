@@ -402,11 +402,14 @@ async function run() {
 
   await guild.channels.fetch();
   const anchorFresh = guild.channels.cache.get(anchor.id);
-  const support = guild.channels.cache.get(deploy.supportCategory.id);
   check('positioning reported success', deploy.positioned?.ok === true, deploy.positioned?.reason);
-  check('Support Center sits above the anchor',
-    support.rawPosition < anchorFresh.rawPosition,
-    `${support.rawPosition} vs ${anchorFresh.rawPosition}`);
+
+  // Both channels were adopted, so they already have parents and there is
+  // nothing for a Support Center category to hold. Creating one anyway would
+  // leave an empty category on somebody's arranged server.
+  check('no redundant Support Center created when both channels are adopted',
+    deploy.supportCategory === null,
+    deploy.supportCategory?.name);
 
   const deployCats = [...new Set(deploy.sections.map((sec) => sec.categoryId))];
   check('every ticket category sits above the anchor',
