@@ -24,9 +24,11 @@ Support Center                 visible to everyone
 
 ## Features
 
-- **Bilingual panel.** The panel embed and the language picker are shown in
-  English and Arabic together; after a member picks one, the category list
-  itself is re-rendered in that language.
+- **Bilingual, end to end.** The panel embed and the language picker are shown
+  in English and Arabic together. Once a member picks one, *everything the bot
+  sends that member* is in it: the category list, the reason modal, every
+  ephemeral reply, the embed in their ticket, and the confirmation, claim and
+  closing DMs that follow hours later. Staff records stay in English.
 - **A daily cap on tickets.** Non-admin members (including ticket staff
   without Administrator) can open a limited number of tickets per day,
   resetting at midnight Oman time.
@@ -199,9 +201,18 @@ category list again, in that language. Only the section names /quick-setup
 ships (Inquiries, Technical Issue, Reports, Ban Appeal, Compensation, Store)
 have a stored Arabic label; a section added later via `/ticket-section-add`
 shows the same name in both, since there is nowhere to store a translation
-for a custom name. Language only affects that picker and the reason modal —
-the ticket channel itself, its embeds and the transcript stay in the
-section's own configured name.
+for a custom name.
+
+The choice is written onto the ticket itself (`lang=` in the channel topic),
+so a claim or a close hours later still reaches the member in their own
+language. It costs no extra channel edit — it is written once, with the rest
+of the topic, when the channel is created.
+
+**What stays English, deliberately:** the alert DMed to staff, and the archive
+written to the log channel. Those are a staff record, and a record that
+switches language depending on who opened the ticket is harder to read back,
+not easier. The member's own copy of the closing card and their transcript
+follow their language.
 
 ### Claim-response timeout
 

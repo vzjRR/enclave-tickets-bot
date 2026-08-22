@@ -423,6 +423,108 @@ async function run() {
   check('an in-memory clock value short-circuits the history fetch',
     (await bot.resolveTicketOwnerActivity(clockChannel, claimedAt)) === sentinel);
   bot.ticketOwnerActivity.delete(clockChannel.id);
+
+  // -------------------------------------------------------------------------
+  section('8. Arabic reaches everything the member is sent');
+
+  const enKeys = Object.keys(bot.UI_STRINGS.en).sort();
+  const arKeys = Object.keys(bot.UI_STRINGS.ar).sort();
+  const untranslated = enKeys.filter((k) => !arKeys.includes(k));
+  check('every English string has an Arabic counterpart',
+    untranslated.length === 0, untranslated.join(', '));
+
+  const hasArabic = (v) => /[\u0600-\u06FF]/.test(v);
+  const arSamples = ['setupMissing', 'sectionGone', 'yourMessage', 'openedBy', 'category',
+    'ticketNumber', 'openedAt', 'closedTitle', 'closedOpenedBy', 'noOne', 'viewTicket',
+    'openNewTicket', 'dmFailed'];
+  const notArabic = arSamples.filter((k) => !hasArabic(bot.UI_STRINGS.ar[k]));
+  check('the Arabic strings are actually in Arabic script',
+    notArabic.length === 0, notArabic.join(', '));
+
+  // A real Arabic ticket, driven through the same createTicket the panel uses.
+  const arSection = restored.config.sections.find((x) => x.name === 'Store') || restored.config.sections[0];
+  const arTicket = await createTicket({
+    guild,
+    user: owner,
+    section: arSection,
+    reason: 'اختبار ذاتي. يرجى التجاهل.',
+    config: getGuildConfig(guild.id),
+    lang: 'ar'
+  });
+  const arChannel = arTicket.channel;
+  cleanup.push(arChannel);
+
+  check('the chosen language is recorded on the ticket',
+    bot.getTicketLang(arChannel) === 'ar', arChannel.topic);
+
+  const arControl = await bot.findTicketControlMessage(arChannel);
+  const arEmbed = arControl?.embeds?.[0];
+  check('the ticket embed title uses the Arabic category name',
+    arEmbed?.title?.includes('المتجر'), arEmbed?.title);
+  check('the ticket embed field names are Arabic',
+    arEmbed?.fields?.[0]?.name === bot.UI_STRINGS.ar.openedBy, arEmbed?.fields?.[0]?.name);
+  check('the ticket embed still shows the member their own words',
+    arEmbed?.description === 'اختبار ذاتي. يرجى التجاهل.', arEmbed?.description);
+
+  // An English ticket must be unaffected by any of the above.
+  check('a ticket with no recorded language falls back to English',
+    bot.getTicketLang({ topic: 'Enclave Tickets | Ticket | owner=1' }) === 'en');
+
+  const arCard = bot.buildClosedTicketCard({
+    guild, ownerId: owner.id, claimedBy: null, closedById: owner.id,
+    openedAt: Date.now() - 1000, closedAt: Date.now(), lang: 'ar'
+  }).toJSON();
+  check('the closed card sent to an Arabic member is Arabic',
+    arCard.title === bot.UI_STRINGS.ar.closedTitle &&
+    arCard.fields[0].name === bot.UI_STRINGS.ar.closedOpenedBy, arCard.title);
+  check('an unclaimed Arabic ticket says "لا أحد"',
+    arCard.fields[1].value === bot.UI_STRINGS.ar.noOne, arCard.fields[1].value);
+
+  const enCard = bot.buildClosedTicketCard({
+    guild, ownerId: owner.id, claimedBy: null, closedById: owner.id,
+    openedAt: Date.now() - 1000, closedAt: Date.now()
+  }).toJSON();
+  check('the staff archive card stays English whoever opened the ticket',
+    enCard.title === 'Ticket Closed' && enCard.fields[0].name === 'Opened By', enCard.title);
+
+  const arRow = await bot.buildClosedTicketLink(guild, owner.id, null, 'ar');
+  check('the closed-card button is Arabic for an Arabic member',
+    arRow?.toJSON().components[0].label === bot.UI_STRINGS.ar.openNewTicket,
+    arRow?.toJSON().components[0].label);
+
+  // -------------------------------------------------------------------------
+  section('9. Message Content intent');
+
+  check('the Message Content intent is enabled', bot.ENABLE_MESSAGE_CONTENT === true,
+    'set ENABLE_MESSAGE_CONTENT=true and enable it in the Developer Portal');
+
+  const probeText = 'transcript probe ' + Date.now();
+  await arChannel.send(probeText);
+  const fetched = [...(await arChannel.messages.fetch({ limit: 50 })).values()]
+    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+  const staffTranscript = bot.buildTranscriptText(arChannel, fetched, { includeSystemNotes: true });
+
+  check('transcripts now carry real message text',
+    staffTranscript.includes(probeText), staffTranscript.slice(0, 200));
+  // The placeholder is still right for a message that genuinely carries no
+  // text -- an embed-only post, say. What must never happen now the intent is
+  // on is it standing in for text the bot could have read.
+  const emptyMessages = fetched.filter((m) => !m.content?.trim());
+  const placeholders = staffTranscript.split('[no text content]').length - 1;
+  check('the placeholder only stands in for genuinely empty messages',
+    placeholders === emptyMessages.length,
+    `${placeholders} placeholders vs ${emptyMessages.length} empty messages`);
+  if (emptyMessages.length) {
+    console.log(`        empty by nature: ${emptyMessages
+      .map((m) => `${m.author?.tag || 'unknown'}${m.embeds.length ? ' (embed only)' : ''}`)
+      .join(', ')}`);
+  }
+  check('the staff transcript no longer carries the missing-intent notice',
+    !staffTranscript.includes('Message Content intent'));
+
+  const memberTranscript = bot.buildTranscriptText(arChannel, fetched, { includeSystemNotes: false });
+  check('the member transcript carries the text and no bot-configuration notice',
+    memberTranscript.includes(probeText) && !memberTranscript.includes('Message Content intent'));
 }
 
 async function main() {

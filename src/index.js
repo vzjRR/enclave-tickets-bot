@@ -66,7 +66,37 @@ const UI_STRINGS = {
     reasonModalTitle: 'Open Ticket',
     reasonLabel: 'Write your concern:',
     rateLimited: (limit) =>
-      `You have reached the daily limit of ${limit} tickets. You can open another after 00:00 (Oman time).`
+      `You have reached the daily limit of ${limit} tickets. You can open another after 00:00 (Oman time).`,
+    setupMissing: 'Ticket setup is not ready yet. Please ask an admin.',
+    sectionGone: 'That ticket category is not configured anymore. Ask an admin to refresh the panel.',
+    alreadyOpen: (channelId) => `You already have an open ticket: <#${channelId}>`,
+    openedTitle: (number) => `Ticket #${number} created`,
+    openedBody: (sectionName, guildName, channelId) =>
+      `Your **${sectionName}** ticket in **${guildName}** is open.\n\n` +
+      `Channel: <#${channelId}>\n\n` +
+      'The support team has been notified. You will get another message here when a staff member picks it up.',
+    yourMessage: 'Your message',
+    dmFailed: 'I could not DM you a confirmation. Enable direct messages from server members if you want ticket updates.',
+    openedBy: 'Opened by',
+    category: 'Category',
+    ticketNumber: 'Ticket number',
+    openedAt: 'Opened at',
+    claimedTitle: (number) => `Ticket #${number} is being handled`,
+    claimedBody: (staffId, guildName, channelId, hours) =>
+      `<@${staffId}> has claimed your ticket in **${guildName}** and is working on it now.\n\n` +
+      `Channel: <#${channelId}>\n\n` +
+      `Please reply within the next **${hours} hours** -- ` +
+      'if there is no reply from you in that time, this ticket will be closed automatically.',
+    closedTitle: 'Ticket Closed',
+    closedOpenedBy: 'Opened By',
+    closedClaimedBy: 'Claimed By',
+    closedClosedBy: 'Closed By',
+    closedOpenTime: 'Open Time',
+    closedCloseTime: 'Close Time',
+    noOne: 'No one',
+    unknown: 'Unknown',
+    viewTicket: 'View Ticket',
+    openNewTicket: 'Open a New Ticket'
   },
   ar: {
     languagePrompt: 'اختر الفئة التي تطابق مشكلتك:',
@@ -75,9 +105,43 @@ const UI_STRINGS = {
     reasonModalTitle: 'فتح تذكرة',
     reasonLabel: 'اكتب استفسارك:',
     rateLimited: (limit) =>
-      `لقد وصلت إلى الحد الأقصى اليومي وهو ${limit} تذاكر. يمكنك فتح تذكرة أخرى بعد الساعة ٠٠:٠٠ بتوقيت عمان.`
+      `لقد وصلت إلى الحد الأقصى اليومي وهو ${limit} تذاكر. يمكنك فتح تذكرة أخرى بعد الساعة ٠٠:٠٠ بتوقيت عمان.`,
+    setupMissing: 'نظام التذاكر غير جاهز بعد. يرجى التواصل مع الإدارة.',
+    sectionGone: 'هذه الفئة لم تعد متاحة. يرجى الطلب من الإدارة تحديث اللوحة.',
+    alreadyOpen: (channelId) => `لديك تذكرة مفتوحة بالفعل: <#${channelId}>`,
+    openedTitle: (number) => `تم إنشاء التذكرة رقم #${number}`,
+    openedBody: (sectionName, guildName, channelId) =>
+      `تم فتح تذكرتك في قسم **${sectionName}** في سيرفر **${guildName}**.\n\n` +
+      `القناة: <#${channelId}>\n\n` +
+      'تم إشعار فريق الدعم. ستصلك رسالة أخرى هنا عندما يستلم أحد أعضاء الفريق تذكرتك.',
+    yourMessage: 'رسالتك',
+    dmFailed: 'لم أتمكن من إرسال رسالة تأكيد لك. فعّل الرسائل المباشرة من أعضاء السيرفر إذا كنت تريد تحديثات التذكرة.',
+    openedBy: 'فتحها',
+    category: 'الفئة',
+    ticketNumber: 'رقم التذكرة',
+    openedAt: 'وقت الفتح',
+    claimedTitle: (number) => `جاري العمل على التذكرة رقم #${number}`,
+    claimedBody: (staffId, guildName, channelId, hours) =>
+      `قام <@${staffId}> باستلام تذكرتك في سيرفر **${guildName}** ويعمل عليها الآن.\n\n` +
+      `القناة: <#${channelId}>\n\n` +
+      `يرجى الرد خلال **${hours} ساعة** -- ` +
+      'إذا لم يصل رد منك خلال هذه المدة، سيتم إغلاق التذكرة تلقائياً.',
+    closedTitle: 'تم إغلاق التذكرة',
+    closedOpenedBy: 'فتحها',
+    closedClaimedBy: 'استلمها',
+    closedClosedBy: 'أغلقها',
+    closedOpenTime: 'وقت الفتح',
+    closedCloseTime: 'وقت الإغلاق',
+    noOne: 'لا أحد',
+    unknown: 'غير معروف',
+    viewTicket: 'عرض التذكرة',
+    openNewTicket: 'فتح تذكرة جديدة'
   }
 };
+
+function t(lang) {
+  return UI_STRINGS[resolveLang(lang)];
+}
 
 function resolveLang(value) {
   return value === 'ar' ? 'ar' : 'en';
@@ -1047,6 +1111,14 @@ async function resolveTicketOwnerActivity(channel, claimedAt) {
   return lastActivity;
 }
 
+// The language the member picked in the panel, carried on the ticket so that a
+// claim or close hours later still speaks to them in it. Written once when the
+// channel is created, so it costs no extra channel edit against Discord's
+// roughly-two-per-ten-minutes topic limit.
+function getTicketLang(channel) {
+  return resolveLang(channel?.topic?.match(/lang=([a-z]{2})/)?.[1]);
+}
+
 function getTicketClaimedAt(channel) {
   const match = channel?.topic?.match(/claimedAt=(\d+)/);
   return match ? Number(match[1]) : null;
@@ -1714,20 +1786,24 @@ async function writeTicketLog(channel, closedById, reason, { messages, transcrip
 // The "Ticket Closed" card: server icon and name in the author line, a 3 + 2
 // grid of inline fields, and Discord-rendered timestamps (the <t:...:F> form
 // renders as "Friday, August 21, 2026 8:07 PM" with the highlighted background).
-function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt, closedAt }) {
+// lang defaults to English on purpose: the archive in the staff log channel
+// calls this without one, so a staff record stays in a single language whoever
+// opened the ticket. Only the member's own copy is localised.
+function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt, closedAt, lang = 'en' }) {
+  const ui = t(lang);
   const embed = new EmbedBuilder()
     .setColor(CLOSED_CARD_COLOR)
     .setAuthor({
       name: guild.name,
       iconURL: guild.iconURL({ size: 128 }) || client.user?.displayAvatarURL({ size: 128 })
     })
-    .setTitle('Ticket Closed')
+    .setTitle(ui.closedTitle)
     .addFields(
-      { name: 'Opened By', value: ownerId ? `<@${ownerId}>` : 'Unknown', inline: true },
-      { name: 'Claimed By', value: claimedBy ? `<@${claimedBy}>` : 'No one', inline: true },
-      { name: 'Closed By', value: closedById ? `<@${closedById}>` : 'Unknown', inline: true },
-      { name: 'Open Time', value: `<t:${Math.floor(openedAt / 1000)}:F>`, inline: true },
-      { name: 'Close Time', value: `<t:${Math.floor(closedAt / 1000)}:F>`, inline: true }
+      { name: ui.closedOpenedBy, value: ownerId ? `<@${ownerId}>` : ui.unknown, inline: true },
+      { name: ui.closedClaimedBy, value: claimedBy ? `<@${claimedBy}>` : ui.noOne, inline: true },
+      { name: ui.closedClosedBy, value: closedById ? `<@${closedById}>` : ui.unknown, inline: true },
+      { name: ui.closedOpenTime, value: `<t:${Math.floor(openedAt / 1000)}:F>`, inline: true },
+      { name: ui.closedCloseTime, value: `<t:${Math.floor(closedAt / 1000)}:F>`, inline: true }
     );
 
   const thumbnail = isHttpUrl(CLOSED_CARD_THUMBNAIL)
@@ -1741,7 +1817,8 @@ function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt
 // A link button only earns its place if the destination actually opens for the
 // person receiving it. Staff get the archived log entry; the member, who cannot
 // see the log channel, gets the panel so they can open a fresh ticket.
-async function buildClosedTicketLink(guild, recipientId, logMessage) {
+async function buildClosedTicketLink(guild, recipientId, logMessage, lang = 'en') {
+  const ui = t(lang);
   const config = getGuildConfig(guild.id);
 
   if (logMessage && config?.logChannelId) {
@@ -1751,7 +1828,7 @@ async function buildClosedTicketLink(guild, recipientId, logMessage) {
     if (logChannel && member && logChannel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel)) {
       return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setLabel('View Ticket')
+          .setLabel(ui.viewTicket)
           .setStyle(ButtonStyle.Link)
           .setURL(logMessage.url)
       );
@@ -1761,7 +1838,7 @@ async function buildClosedTicketLink(guild, recipientId, logMessage) {
   if (config?.channelId) {
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setLabel('Open a New Ticket')
+        .setLabel(ui.openNewTicket)
         .setStyle(ButtonStyle.Link)
         .setURL(`https://discord.com/channels/${guild.id}/${config.channelId}`)
     );
@@ -1790,8 +1867,10 @@ async function closeAndArchiveTicket(channel, closedById) {
   const logged = await writeTicketLog(channel, closedById, reason, { messages, transcript });
 
   if (ownerId) {
+    const ownerLang = getTicketLang(channel);
     const card = buildClosedTicketCard({
       guild: channel.guild,
+      lang: ownerLang,
       ownerId,
       claimedBy: getTicketClaimedBy(channel),
       closedById,
@@ -1799,7 +1878,7 @@ async function closeAndArchiveTicket(channel, closedById) {
       closedAt: Date.now()
     }).setFooter({ text: BRAND_FOOTER });
 
-    const row = await buildClosedTicketLink(channel.guild, ownerId, logged.message);
+    const row = await buildClosedTicketLink(channel.guild, ownerId, logged.message, ownerLang);
 
     // A shared log channel cannot show one member only their own entry, so
     // the member is sent their own transcript instead of being given access
@@ -1936,7 +2015,7 @@ async function notifyStaffOfNewTicket({ guild, section, channel, user, reason, t
   return { attempted: recipients.length, delivered, skipped: false };
 }
 
-async function createTicket({ guild, user, section, reason, config }) {
+async function createTicket({ guild, user, section, reason, config, lang = 'en' }) {
   const everyoneId = guild.roles.everyone.id;
 
   // Reserve the number under a per-guild lock. Read-increment-write without one
@@ -1991,21 +2070,26 @@ async function createTicket({ guild, user, section, reason, config }) {
     name: channelName,
     type: ChannelType.GuildText,
     parent: section.categoryId,
-    topic: `${TICKET_MARKER} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | status=open`,
+    topic: `${TICKET_MARKER} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | lang=${resolveLang(lang)} | status=open`,
     permissionOverwrites
   });
 
   const staffMentions = section.roleIds.map((roleId) => `<@&${roleId}>`).join(' ');
   const openedAt = Math.floor(Date.now() / 1000);
+  // This embed sits in the member's own ticket and is addressed to them, so it
+  // follows their language. Staff keep an English record either way: the staff
+  // alert DM and the archive written to the log channel are both unlocalised.
+  const ui = t(lang);
+  const localSectionName = translateSectionName(section.name, lang);
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
-    .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${section.name}`)
+    .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${localSectionName}`)
     .setDescription(reason)
     .addFields(
-      { name: 'Opened by', value: `<@${user.id}>`, inline: true },
-      { name: 'Category', value: section.name, inline: true },
-      { name: 'Ticket number', value: `#${ticketNumber}`, inline: true },
-      { name: 'Opened at', value: `<t:${openedAt}:f>`, inline: true }
+      { name: ui.openedBy, value: `<@${user.id}>`, inline: true },
+      { name: ui.category, value: localSectionName, inline: true },
+      { name: ui.ticketNumber, value: `#${ticketNumber}`, inline: true },
+      { name: ui.openedAt, value: `<t:${openedAt}:f>`, inline: true }
     )
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
@@ -2047,13 +2131,9 @@ async function createTicket({ guild, user, section, reason, config }) {
     embeds: [
       new EmbedBuilder()
         .setColor(config.color || BRAND_COLOR)
-        .setTitle(`Ticket #${ticketNumber} created`)
-        .setDescription(
-          `Your **${section.name}** ticket in **${guild.name}** is open.\n\n` +
-          `Channel: <#${channel.id}>\n\n` +
-          'The support team has been notified. You will get another message here when a staff member picks it up.'
-        )
-        .addFields({ name: 'Your message', value: reason.slice(0, 1024) })
+        .setTitle(ui.openedTitle(ticketNumber))
+        .setDescription(ui.openedBody(localSectionName, guild.name, channel.id))
+        .addFields({ name: ui.yourMessage, value: reason.slice(0, 1024) })
         .setFooter({ text: BRAND_FOOTER })
         .setTimestamp()
     ]
@@ -2062,9 +2142,7 @@ async function createTicket({ guild, user, section, reason, config }) {
   if (!notified) {
     // Their DMs are closed, so say it in the ticket instead.
     await channel.send({
-      content:
-        `<@${user.id}> I could not DM you a confirmation. ` +
-        'Enable direct messages from server members if you want ticket updates.'
+      content: `<@${user.id}> ${ui.dmFailed}`
     }).catch(() => {});
   }
 
@@ -2075,8 +2153,11 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
   let config = getGuildConfig(interaction.guildId);
 
   if (!config?.sections?.length) {
+    // Member-facing, so it says nothing about the bot's own configuration --
+    // that operational detail goes to the console for staff instead.
+    console.error(`Ticket attempted in ${interaction.guildId} with no sections configured. Run /quick-setup.`);
     await sendInteractionResult(interaction, {
-      content: 'Ticket setup data is missing. Run /quick-setup to build the panels.',
+      content: t(lang).setupMissing,
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2086,7 +2167,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
 
   if (!section) {
     await sendInteractionResult(interaction, {
-      content: 'That ticket section is not configured anymore.',
+      content: t(lang).sectionGone,
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2102,7 +2183,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
 
   if (existingTicket) {
     await sendInteractionResult(interaction, {
-      content: `You already have an open ticket: <#${existingTicket.id}>`,
+      content: t(lang).alreadyOpen(existingTicket.id),
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2112,7 +2193,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
     const { allowed } = consumeTicketRateLimit(interaction.guildId, interaction.user.id, TICKET_DAILY_LIMIT);
     if (!allowed) {
       await sendInteractionResult(interaction, {
-        content: UI_STRINGS[resolveLang(lang)].rateLimited(TICKET_DAILY_LIMIT),
+        content: t(lang).rateLimited(TICKET_DAILY_LIMIT),
         flags: MessageFlags.Ephemeral
       });
       return;
@@ -2122,6 +2203,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
   const result = await createTicket({
     guild: interaction.guild,
     user: interaction.user,
+    lang,
     section,
     reason,
     config
@@ -2991,8 +3073,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       let config = getGuildConfig(interaction.guildId);
 
       if (!config?.sections?.length) {
+        console.error(`Category picked in ${interaction.guildId} with no sections configured. Run /quick-setup.`);
         await interaction.reply({
-          content: 'Ticket setup data is missing. Run /setup again and publish a new panel.',
+          content: t(lang).setupMissing,
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -3005,7 +3088,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const selectedSection = config.sections.find((item) => item.id === sectionId);
       if (!selectedSection) {
         await interaction.reply({
-          content: 'That ticket category is not configured anymore. Ask an admin to refresh the panel.',
+          content: t(lang).sectionGone,
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -3016,7 +3099,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       );
       if (existingTicket) {
         await interaction.reply({
-          content: `You already have a ticket: <#${existingTicket.id}>`,
+          content: t(lang).alreadyOpen(existingTicket.id),
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -3106,18 +3189,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const claimResponseHours = Math.round(CLAIM_RESPONSE_TIMEOUT_MS / 3_600_000);
           const claimTicketNumber = getTicketNumber(interaction.channel) || 'unknown';
+          const claimUi = t(getTicketLang(interaction.channel));
           await dmUser(getTicketOwnerId(interaction.channel), {
             embeds: [
               new EmbedBuilder()
                 .setColor(0x2ecc71)
-                .setTitle(`Ticket #${claimTicketNumber} is being handled`)
-                .setDescription(
-                  `<@${interaction.user.id}> has claimed your ticket in ` +
-                  `**${interaction.guild.name}** and is working on it now.\n\n` +
-                  `Channel: <#${interaction.channel.id}>\n\n` +
-                  `Please reply within the next **${claimResponseHours} hours** -- ` +
-                  'if there is no reply from you in that time, this ticket will be closed automatically.'
-                )
+                .setTitle(claimUi.claimedTitle(claimTicketNumber))
+                .setDescription(claimUi.claimedBody(
+                  interaction.user.id,
+                  interaction.guild.name,
+                  interaction.channel.id,
+                  claimResponseHours
+                ))
                 .setFooter({ text: BRAND_FOOTER })
                 .setTimestamp()
             ]
@@ -3376,6 +3459,10 @@ module.exports = {
   CLAIM_RESPONSE_TIMEOUT_MS,
   trySetTicketTopicValues,
   TICKET_MARKER,
+  UI_STRINGS,
+  getTicketLang,
+  buildClosedTicketCard,
+  buildClosedTicketLink,
   isAllowedGuild,
   ALLOWED_GUILD_ID,
   resolveTicketOwnerActivity,
