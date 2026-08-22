@@ -128,11 +128,41 @@ Ticket panel resynced for guild <id>.
 | Logs | `journalctl -u enclave-tickets -f` |
 | Restart | `sudo systemctl restart enclave-tickets` |
 | Stop | `sudo systemctl stop enclave-tickets` |
-| Update | `git pull && npm ci --omit=dev && sudo systemctl restart enclave-tickets` |
+| Update | see below |
+
+### Updating
+
+```bash
+cd /opt/enclave-tickets
+sudo -u enclave-tickets git pull
+sudo npm ci --omit=dev
+sudo chown -R enclave-tickets:enclave-tickets /opt/enclave-tickets
+sudo chmod 600 .env
+sudo systemctl restart enclave-tickets
+```
+
+Two things make this longer than a plain `git pull`. The checkout is owned by
+the service user, so git run as anyone else refuses it as "dubious ownership"
+— either pull as that user, as above, or allow it once with
+`sudo git config --system --add safe.directory /opt/enclave-tickets`. And
+`npm ci` needs a writable HOME for its cache, which a `nologin` service user
+does not have, so it runs as root and ownership is restored afterwards.
 
 A restart is safe with open tickets. The claim-response clock is rebuilt from
 each channel's own history on the first sweep, so a ticket whose owner replied
 shortly before the restart is not mistaken for an abandoned one.
+
+### If the box runs other bots under their own users
+
+The unit ships with `User=discordbots`. Where the convention is one user per
+bot, create one and point the unit at it — this is what the Enclave deployment
+does:
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin enclave-tickets
+sudo sed -i 's/^User=discordbots/User=enclave-tickets/;s/^Group=discordbots/Group=enclave-tickets/' \
+  /etc/systemd/system/enclave-tickets.service
+```
 
 The unit restarts the bot automatically if it exits, capped at 10 restarts in
 5 minutes so a genuinely broken build does not spin forever.
