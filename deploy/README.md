@@ -35,6 +35,36 @@ you are targeting — see **Adopting an existing server** in the main README.
 `.env` holds the bot token. `chmod 600` matters: anyone who can read it controls
 the bot.
 
+Three settings are worth getting right the first time:
+
+| | |
+| --- | --- |
+| `GUILD_ID` | **Required if this bot token runs anywhere else.** A running bot answers every guild its application is in, so two instances on one token both reply to the same click — two tickets, two DMs. Setting this confines the instance to one guild. |
+| `ENABLE_GUILD_MEMBERS` | `true` to DM staff on a new ticket. Enable **Server Members** in the Developer Portal first — setting this true while the portal toggle is off makes login fail outright. |
+| `ENABLE_MESSAGE_CONTENT` | `true` to put real message text in transcripts. Same caveat: enable **Message Content** in the portal first. |
+
+## 2b. Seed `data/tickets.json` if the server already has a panel
+
+Skip this on a genuinely fresh server. But if the guild already has a ticket
+panel posted — because a previous instance provisioned it — the new box starts
+with no memory of it, and `/quick-setup` posts a **second** panel rather than
+adopting the first. Copy the existing config across instead:
+
+```bash
+# from the machine that has the current data/tickets.json
+scp data/tickets.json USER@SERVER:/tmp/tickets.json
+```
+
+```bash
+# on the server
+mkdir -p /opt/enclave-tickets/data
+cp /tmp/tickets.json /opt/enclave-tickets/data/tickets.json && rm /tmp/tickets.json
+```
+
+With that in place the bot adopts the live panel on startup, and step 5 becomes
+unnecessary. It also carries the ticket counter across, so numbering continues
+rather than restarting.
+
 ## 3. Register the slash commands
 
 Once, and again whenever the commands change:
@@ -79,9 +109,17 @@ Ticket refresh complete. guild=... total=0 failed=0
 
 ## 5. Provision the server
 
-In Discord, run `/quick-setup`. With the ids set in `.env` it adopts your
-existing panel channel, log channel and staff role, creates the categories it
-needs, and places them above the anchor category.
+**Only if you skipped 2b.** In Discord, run `/quick-setup`. With the ids set in
+`.env` it adopts your existing panel channel, log channel and staff role,
+creates the categories it needs, and places them above the anchor category.
+
+If you did seed `data/tickets.json`, there is nothing to run: the bot re-edits
+its saved panel at startup, which also upgrades a panel posted by an older
+build to the current menu. Watch for this line in the log:
+
+```
+Ticket panel resynced for guild <id>.
+```
 
 ## Operating it
 
@@ -91,6 +129,10 @@ needs, and places them above the anchor category.
 | Restart | `sudo systemctl restart enclave-tickets` |
 | Stop | `sudo systemctl stop enclave-tickets` |
 | Update | `git pull && npm ci --omit=dev && sudo systemctl restart enclave-tickets` |
+
+A restart is safe with open tickets. The claim-response clock is rebuilt from
+each channel's own history on the first sweep, so a ticket whose owner replied
+shortly before the restart is not mistaken for an abandoned one.
 
 The unit restarts the bot automatically if it exits, capped at 10 restarts in
 5 minutes so a genuinely broken build does not spin forever.
