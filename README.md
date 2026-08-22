@@ -24,6 +24,15 @@ Support Center                 visible to everyone
 
 ## Features
 
+- **Bilingual panel.** The panel embed and the language picker are shown in
+  English and Arabic together; after a member picks one, the category list
+  itself is re-rendered in that language.
+- **A daily cap on tickets.** Non-admin members (including ticket staff
+  without Administrator) can open a limited number of tickets per day,
+  resetting at midnight Oman time.
+- **A claim-response deadline.** A member is warned when their ticket is
+  claimed that they have a limited window to reply, and the ticket closes on
+  its own if they don't.
 - **Self-provisioning.** One command builds the categories, channels, role and
   panel — or adopts the ones your server already has.
 - **Categories that hide themselves.** A section category is invisible to
@@ -147,20 +156,48 @@ entire mechanism.
 
 ## Ticket lifecycle
 
-1. A member picks a category in the panel channel and writes their concern.
+1. A member picks a language from the panel, then a category in that
+   language, and writes their concern.
 2. The bot creates `ticket-<number>`, private to them and the staff role.
 3. Staff are **mentioned in the channel**, and DMed as well if
    `ENABLE_GUILD_MEMBERS` is on. The member is DMed a confirmation.
 4. The pinned control message carries **Claim**, **Close & Delete** and
    **Admin Panel**.
-5. On **Claim**, the member is told their ticket is being handled and by whom.
+5. On **Claim**, the member is told their ticket is being handled, by whom,
+   and that they have `CLAIM_RESPONSE_TIMEOUT_HOURS` to reply before it closes
+   automatically.
 6. On **Close**, the archive is written to the log, the member is DMed a
    "Ticket Closed" card with their transcript attached, and the channel is
    deleted ten seconds later.
 
-One open ticket per member. Ticket state lives in the channel topic (`owner=`,
-`status=`, `claimedBy=`, `ticketNumber=`); configuration lives in
-`data/tickets.json`.
+One open ticket per member, and at most `TICKET_DAILY_LIMIT` new tickets per
+day for anyone without Administrator (resetting at 00:00 Oman time). Ticket
+state lives in the channel topic (`owner=`, `status=`, `claimedBy=`,
+`claimedAt=`, `ticketNumber=`); configuration lives in `data/tickets.json`.
+
+### Language picker
+
+The panel's select menu is a language choice first ("Choose your language -
+اختر لغتك المفضلة"): English (🇬🇧) or العربية (🇴🇲). Picking one shows the
+category list again, in that language. Only the section names /quick-setup
+ships (Inquiries, Technical Issue, Reports, Ban Appeal, Compensation, Store)
+have a stored Arabic label; a section added later via `/ticket-section-add`
+shows the same name in both, since there is nowhere to store a translation
+for a custom name. Language only affects that picker and the reason modal —
+the ticket channel itself, its embeds and the transcript stay in the
+section's own configured name.
+
+### Claim-response timeout
+
+Claiming a ticket starts a clock on the **member**, not on staff: if the
+owner does not post in their own ticket within `CLAIM_RESPONSE_TIMEOUT_HOURS`
+of being claimed, the ticket is closed automatically (archived exactly like
+any other close). It is checked on the same cadence as the maintenance sweep
+(`TICKET_REFRESH_INTERVAL_MINUTES`), so the actual close can land up to that
+long after the deadline — lower the interval for tighter precision. The
+clock is tracked in memory and resets on every message from the owner; a bot
+restart resets it to the claim time rather than the owner's last message, the
+conservative direction.
 
 ### The log, and member privacy
 
@@ -174,7 +211,10 @@ count, the concern the member wrote, and a full `.txt` transcript.
 
 Transcripts include authors, timestamps and attachment URLs. Message **text**
 additionally requires the Message Content intent; without it every line reads
-`[no text content]` and the transcript header says so.
+`[no text content]`. The staff copy in the log channel says so in its header
+when the intent is off; the member's own copy never mentions the bot's
+configuration at all — that notice, like any other operational detail, is
+staff-only.
 
 ## Commands
 
@@ -210,6 +250,8 @@ code never relies on them alone.
 | `TRANSCRIPT_SEND_TO_OWNER` | `true` | DM the member their transcript. |
 | `ENABLE_MESSAGE_CONTENT` | `false` | Privileged intent; puts message text in transcripts. |
 | `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
+| `TICKET_DAILY_LIMIT` | `3` | Tickets per day for a non-admin member. Resets at 00:00 Oman time. |
+| `CLAIM_RESPONSE_TIMEOUT_HOURS` | `12` | Hours the member has to reply after claim before auto-close. |
 
 ### Privileged intents
 
@@ -218,6 +260,10 @@ gateway intents. Enable them at **Developer Portal → your app → Bot → Priv
 Gateway Intents** *before* switching them on here — requesting an intent that is
 not enabled makes login fail outright. Both default to off, and the features
 they gate degrade rather than break.
+
+The bot also requests the (non-privileged, no portal toggle needed)
+`GuildMessages` intent, so it can see when a claimed ticket's owner replies —
+that is what the claim-response timeout watches.
 
 ## Running it on a server
 

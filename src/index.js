@@ -32,7 +32,7 @@ const {
 
 const BRAND_NAME = 'Enclave Tickets';
 const BRAND_COLOR = 0x90773E;
-const BUILD_ID = 'enclave-tickets-2026-08-21-v3';
+const BUILD_ID = 'enclave-tickets-2026-08-21-v4';
 const TICKET_MARKER = 'Enclave Tickets | Ticket';
 
 // Every member-facing embed carries the same footer.
@@ -41,12 +41,127 @@ const BRAND_FOOTER = `${BRAND_NAME} | ${BRAND_TAGLINE}`;
 
 // Presentation for the ticket panel.
 const PANEL_EMOJI = '🎫';
+const PANEL_TITLE = `${PANEL_EMOJI} Enclave Tickets - تذاكر الدعم`;
 const PANEL_DESCRIPTION =
-  'Pick the category that matches your issue. You will get a private channel and a direct message confirming it.\n\nClosed tickets are archived to the staff log and the channel is removed.';
+  'Pick the category that matches your issue. You will get a private channel and a direct message confirming it.\n\n' +
+  'اختر الفئة التي تطابق مشكلتك. ستحصل على قناة خاصة ورسالة مباشرة تؤكد ذلك.';
 const REFRESH_INTERVAL_MINUTES = Math.max(
   5,
   Number.parseInt(process.env.TICKET_REFRESH_INTERVAL_MINUTES || '30', 10) || 30
 );
+
+// Panel language picker. The category list itself is re-rendered in whichever
+// of these the member picks; everything after that (the ticket channel, its
+// embeds, the transcript) stays in the section's own configured name.
+const LANGUAGE_OPTIONS = [
+  { value: 'en', label: 'English', emoji: '🇬🇧' },
+  { value: 'ar', label: 'العربية', emoji: '🇴🇲' }
+];
+
+const UI_STRINGS = {
+  en: {
+    languagePrompt: 'Select the category that matches your issue:',
+    chooseCategory: 'Select a Category',
+    categoryDescription: (name) => `Open a ${name} ticket`,
+    reasonModalTitle: 'Open Ticket',
+    reasonLabel: 'Write your concern:',
+    rateLimited: (limit) =>
+      `You have reached the daily limit of ${limit} tickets. You can open another after 00:00 (Oman time).`
+  },
+  ar: {
+    languagePrompt: 'اختر الفئة التي تطابق مشكلتك:',
+    chooseCategory: 'اختر الفئة',
+    categoryDescription: (name) => `فتح تذكرة ${name}`,
+    reasonModalTitle: 'فتح تذكرة',
+    reasonLabel: 'اكتب استفسارك:',
+    rateLimited: (limit) =>
+      `لقد وصلت إلى الحد الأقصى اليومي وهو ${limit} تذاكر. يمكنك فتح تذكرة أخرى بعد الساعة ٠٠:٠٠ بتوقيت عمان.`
+  }
+};
+
+function resolveLang(value) {
+  return value === 'ar' ? 'ar' : 'en';
+}
+
+// Only the section names shipped by /quick-setup have a known Arabic label.
+// A section added later via /ticket-section-add keeps whatever name staff
+// gave it in both languages -- there is nowhere to store a translation for it.
+const SECTION_NAME_TRANSLATIONS = {
+  'Inquiries': 'استفسارات',
+  'Technical Issue': 'مشكلة تقنية',
+  'Reports': 'بلاغات',
+  'Ban Appeal': 'استئناف حظر',
+  'Compensation': 'تعويض',
+  'Store': 'المتجر'
+};
+
+function translateSectionName(name, lang) {
+  if (lang !== 'ar') return name;
+  return SECTION_NAME_TRANSLATIONS[name] || name;
+}
+
+// Oman does not observe daylight saving, so a fixed UTC+4 offset is exact.
+const OMAN_UTC_OFFSET_MS = 4 * 60 * 60 * 1000;
+
+function omanDateKey(date = new Date()) {
+  return new Date(date.getTime() + OMAN_UTC_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+// Real admins and the guild owner are exempt from the daily ticket cap;
+// everyone else -- including ticket staff without Administrator -- is not.
+function isTicketRateLimitExempt(interaction) {
+  if (interaction.guild.ownerId === interaction.user.id) return true;
+  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
+}
+
+const TICKET_DAILY_LIMIT = Math.max(
+  1,
+  Number.parseInt(process.env.TICKET_DAILY_LIMIT || '3', 10) || 3
+);
+
+// Read-modify-write is safe without an extra lock: readDb/writeDb are
+// synchronous fs calls, so nothing else can interleave between the read and
+// the write within a single call.
+function consumeTicketRateLimit(guildId, userId, maxPerDay) {
+  const today = omanDateKey();
+  let allowed = false;
+  let remaining = 0;
+
+  updateGuildConfig(guildId, (config) => {
+    if (!config) return null;
+
+    const rateLimits = { ...(config.ticketRateLimits || {}) };
+    const entry = rateLimits[userId];
+    const current = entry && entry.day === today ? entry.count : 0;
+
+    if (current >= maxPerDay) {
+      allowed = false;
+      return null;
+    }
+
+    allowed = true;
+    remaining = maxPerDay - (current + 1);
+    rateLimits[userId] = { day: today, count: current + 1 };
+    return { ...config, ticketRateLimits: rateLimits };
+  });
+
+  return { allowed, remaining };
+}
+
+// How long a member has to reply after their ticket is claimed before it is
+// closed automatically. Checked on the same cadence as the maintenance sweep
+// (TICKET_REFRESH_INTERVAL_MINUTES), so lower that if tighter precision on
+// the deadline matters more than the extra Discord API traffic.
+const CLAIM_RESPONSE_TIMEOUT_MS = Math.max(
+  1,
+  Number.parseInt(process.env.CLAIM_RESPONSE_TIMEOUT_HOURS || '12', 10) || 12
+) * 60 * 60 * 1000;
+
+// In-memory only: the last time the ticket owner (not staff) posted in their
+// own ticket after it was claimed. Reset by a bot restart, which is treated as
+// "no activity since claim" -- the conservative direction, since the topic's
+// claimedAt is the fallback floor rather than a precise clock.
+const ticketOwnerActivity = new Map();
 
 function envFlag(name, fallback) {
   const value = process.env[name];
@@ -124,7 +239,11 @@ const pendingChannelRenames = new Map();
 const guildWriteQueues = new Map();
 let maintenanceRunning = false;
 
-const intents = [GatewayIntentBits.Guilds];
+// GuildMessages is not privileged (no Developer Portal toggle needed); it is
+// what lets MessageCreate fire at all, which the claim-response timeout needs
+// to see the ticket owner reply. It does not by itself expose message text --
+// that still needs the privileged MessageContent intent below.
+const intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages];
 if (ENABLE_MESSAGE_CONTENT) intents.push(GatewayIntentBits.MessageContent);
 if (ENABLE_GUILD_MEMBERS) intents.push(GatewayIntentBits.GuildMembers);
 
@@ -296,6 +415,15 @@ client.on(Events.ShardReconnecting, (shardId) => {
   console.warn(`Discord shard reconnecting. shard=${shardId}`);
 });
 
+// Feeds the claim-response timeout: only the ticket owner's own messages
+// reset their clock, so staff chatting in the channel does not.
+client.on(Events.MessageCreate, (message) => {
+  if (!message.guild || message.author?.bot) return;
+  if (!isTicketChannel(message.channel)) return;
+  if (getTicketOwnerId(message.channel) !== message.author.id) return;
+  ticketOwnerActivity.set(message.channel.id, Date.now());
+});
+
 function isHttpUrl(value) {
   if (!value) return false;
 
@@ -362,7 +490,7 @@ function buildPanelEmbed(config) {
 
   const embed = new EmbedBuilder()
     .setColor(custom.color || BRAND_COLOR)
-    .setTitle(custom.title || `${PANEL_EMOJI} ${BRAND_NAME}`)
+    .setTitle(custom.title || PANEL_TITLE)
     .setDescription(custom.description || PANEL_DESCRIPTION)
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
@@ -378,6 +506,9 @@ function buildPanelEmbed(config) {
   return embed;
 }
 
+// The panel's own select menu is only ever the language picker; picking a
+// category happens one ephemeral step later, in whichever language was
+// chosen (see buildCategoryMenu).
 function buildPanelMenu(config) {
   const sections = config.sections || [];
 
@@ -386,16 +517,33 @@ function buildPanelMenu(config) {
   if (!sections.length) return null;
 
   const menu = new StringSelectMenuBuilder()
-    .setCustomId('ticket:panel')
-    .setPlaceholder('Select a Category');
+    .setCustomId('ticket:language')
+    .setPlaceholder('Choose your language - اختر لغتك المفضلة');
+
+  for (const option of LANGUAGE_OPTIONS) {
+    menu.addOptions({ label: option.label, value: option.value, emoji: option.emoji });
+  }
+
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+function buildCategoryMenu(config, lang) {
+  const sections = config.sections || [];
+  if (!sections.length) return null;
+
+  const t = UI_STRINGS[resolveLang(lang)];
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`ticket:category:${resolveLang(lang)}`)
+    .setPlaceholder(t.chooseCategory);
 
   for (const section of sections.slice(0, 25)) {
     const sectionEmoji = parseSectionEmoji(section.emoji);
+    const label = translateSectionName(section.name, lang);
     menu.addOptions({
-      label: section.name.slice(0, 100),
+      label: label.slice(0, 100),
       value: section.id,
       emoji: sectionEmoji?.menu,
-      description: `Open a ${section.name} ticket`.slice(0, 100)
+      description: t.categoryDescription(label).slice(0, 100)
     });
   }
 
@@ -506,15 +654,16 @@ function createSectionModal() {
     );
 }
 
-function createReasonModal(sectionId) {
+function createReasonModal(sectionId, lang = 'en') {
+  const t = UI_STRINGS[resolveLang(lang)];
   return new ModalBuilder()
-    .setCustomId(`ticket:reason:${sectionId}`)
-    .setTitle('Open Ticket')
+    .setCustomId(`ticket:reason:${sectionId}:${resolveLang(lang)}`)
+    .setTitle(t.reasonModalTitle)
     .addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('reason')
-          .setLabel('Write your concern:')
+          .setLabel(t.reasonLabel)
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
           .setMaxLength(1000)
@@ -761,6 +910,22 @@ async function refreshTicketChannel(channel) {
     ? 'closed'
     : 'open';
   const claimedBy = getTicketClaimedBy(channel);
+
+  if (status === 'open' && claimedBy) {
+    const claimedAt = getTicketClaimedAt(channel);
+    if (claimedAt) {
+      const lastActivity = ticketOwnerActivity.get(channel.id) ?? claimedAt;
+      if (Date.now() - lastActivity >= CLAIM_RESPONSE_TIMEOUT_MS) {
+        console.log(
+          `Auto-closing ticket ${channel.id}: no reply from the owner for ` +
+          `${formatDuration(Date.now() - lastActivity)} since it was claimed.`
+        );
+        await closeAndArchiveTicket(channel, client.user.id);
+        return { channelId: channel.id, controlsUpdated: false, status: 'closed', autoClosed: true };
+      }
+    }
+  }
+
   const controlMessage = await tryUpdatePinnedTicketControls(channel, status, claimedBy);
   await trySetTicketTopicValue(channel, 'status', status);
   return { channelId: channel.id, controlsUpdated: Boolean(controlMessage), status };
@@ -832,6 +997,11 @@ function getTicketClaimedBy(channel) {
   return match?.[1] || null;
 }
 
+function getTicketClaimedAt(channel) {
+  const match = channel?.topic?.match(/claimedAt=(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
 function getTicketNumber(channel) {
   const topicMatch = channel?.topic?.match(/ticketNumber=(\d+)/);
   if (topicMatch) return topicMatch[1];
@@ -873,6 +1043,48 @@ async function trySetTicketTopicValue(channel, key, value) {
     return true;
   } catch (error) {
     console.error(`Failed to set ticket topic ${key}=${value} for ${channel.id}:`, error);
+    return false;
+  }
+}
+
+// Same merge behaviour as setTicketTopicValue, but writes several keys in one
+// edit -- claiming a ticket sets claimedBy and claimedAt together, and the
+// channel topic edit rate limit (roughly 2 per 10 minutes) is too tight to
+// spend two edits on one action.
+async function setTicketTopicValues(channel, entries) {
+  const fresh = await channel.guild.channels
+    .fetch(channel.id, { force: true })
+    .catch(() => channel);
+
+  let topic = fresh.topic || TICKET_MARKER;
+  let changed = false;
+
+  for (const [key, value] of Object.entries(entries)) {
+    const pair = `${key}=${value}`;
+    if (topic.includes(`${key}=`)) {
+      const nextTopic = topic.replace(new RegExp(`${key}=[^|]+`), pair);
+      if (nextTopic !== topic) changed = true;
+      topic = nextTopic;
+    } else {
+      topic = `${topic} | ${pair}`;
+      changed = true;
+    }
+  }
+
+  if (!changed) return;
+  await fresh.setTopic(topic.slice(0, 1024));
+}
+
+async function trySetTicketTopicValues(channel, entries, label = 'topic values') {
+  try {
+    await withTimeout(
+      setTicketTopicValues(channel, entries),
+      `Set ${label} for ${channel.id}`,
+      4_000
+    );
+    return true;
+  } catch (error) {
+    console.error(`Failed to set ${label} for ${channel.id}:`, error);
     return false;
   }
 }
@@ -936,14 +1148,18 @@ async function fetchTranscriptMessages(channel, limit = 1000) {
   return collected.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 }
 
-function buildTranscriptText(channel, messages) {
+// includeSystemNotes gates operational notices about the bot's own
+// configuration (a missing intent, and similar). Those are for staff eyes in
+// the log channel only -- a member's own copy of their transcript never
+// mentions bot internals, so it defaults to leaving them out.
+function buildTranscriptText(channel, messages, { includeSystemNotes = false } = {}) {
   const lines = [
     `Transcript for #${channel.name}`,
     `Channel ID: ${channel.id}`,
     `Generated At: ${new Date().toISOString()}`
   ];
 
-  if (!ENABLE_MESSAGE_CONTENT) {
+  if (includeSystemNotes && !ENABLE_MESSAGE_CONTENT) {
     lines.push(
       'NOTE: message text is unavailable because the Message Content intent is off.',
       'Enable it in the Discord Developer Portal and set ENABLE_MESSAGE_CONTENT=true.'
@@ -1489,7 +1705,9 @@ async function closeAndArchiveTicket(channel, closedById) {
   } catch (error) {
     console.error(`Failed to collect transcript for ${channel.id}:`, error?.message || error);
   }
-  const transcript = buildTranscriptText(channel, messages);
+  // Staff get the full transcript, including notices about the bot's own
+  // configuration; the member's own copy below never carries those.
+  const transcript = buildTranscriptText(channel, messages, { includeSystemNotes: true });
 
   const logged = await writeTicketLog(channel, closedById, reason, { messages, transcript });
 
@@ -1507,9 +1725,11 @@ async function closeAndArchiveTicket(channel, closedById) {
 
     // A shared log channel cannot show one member only their own entry, so
     // the member is sent their own transcript instead of being given access
-    // to everyone else's.
+    // to everyone else's. It is built fresh (rather than reusing the staff
+    // copy) so it never carries a notice about the bot's own configuration.
+    const memberTranscript = buildTranscriptText(channel, messages, { includeSystemNotes: false });
     const files = TRANSCRIPT_SEND_TO_OWNER
-      ? [new AttachmentBuilder(Buffer.from(transcript, 'utf8'), {
+      ? [new AttachmentBuilder(Buffer.from(memberTranscript, 'utf8'), {
           name: `ticket-${ticketNumber}-transcript.txt`
         })]
       : [];
@@ -1528,6 +1748,7 @@ async function closeAndArchiveTicket(channel, closedById) {
   clearPendingTicketRename(channel.guild.id, channel.id);
   clearTicketControlMessageId(channel.guild.id, channel.id);
   setTicketClosedState(channel.guild.id, channel.id, false);
+  ticketOwnerActivity.delete(channel.id);
 
   console.log(
     `Ticket ${ticketNumber} closed by ${closedById}; archived=${logged.ok} ` +
@@ -1772,7 +1993,7 @@ async function createTicket({ guild, user, section, reason, config }) {
   return { channel, ticketNumber, notified };
 }
 
-async function openTicket(interaction, sectionId, reason) {
+async function openTicket(interaction, sectionId, reason, lang = 'en') {
   let config = getGuildConfig(interaction.guildId);
 
   if (!config?.sections?.length) {
@@ -1807,6 +2028,17 @@ async function openTicket(interaction, sectionId, reason) {
       flags: MessageFlags.Ephemeral
     });
     return;
+  }
+
+  if (!isTicketRateLimitExempt(interaction)) {
+    const { allowed } = consumeTicketRateLimit(interaction.guildId, interaction.user.id, TICKET_DAILY_LIMIT);
+    if (!allowed) {
+      await sendInteractionResult(interaction, {
+        content: UI_STRINGS[resolveLang(lang)].rateLimited(TICKET_DAILY_LIMIT),
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
   }
 
   const result = await createTicket({
@@ -2511,9 +2743,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .catch(() => {});
 
         await interaction.editReply({
-          content: result.logged.ok
-            ? `Ticket #${result.ticketNumber} archived to the log channel. The channel will be deleted shortly.`
-            : `Ticket #${result.ticketNumber} is being deleted, but no log channel is configured so nothing was archived. Run /quick-setup.`
+          // The "no log channel configured" detail is an operational note about
+          // the bot's own setup, not something the ticket owner needs to see --
+          // it stays staff-only (it is already console.error'd for the log too).
+          content: !canManage
+            ? `Ticket #${result.ticketNumber} is being deleted. The channel will disappear shortly.`
+            : result.logged.ok
+              ? `Ticket #${result.ticketNumber} archived to the log channel. The channel will be deleted shortly.`
+              : `Ticket #${result.ticketNumber} is being deleted, but no log channel is configured so nothing was archived. Run /quick-setup.`
         });
         return;
       }
@@ -2620,7 +2857,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.customId.startsWith('ticket:reason:')) {
-        const sectionId = interaction.customId.split(':')[2];
+        const [, , sectionId, lang] = interaction.customId.split(':');
         const reason = interaction.fields.getTextInputValue('reason');
         const creationKey = `${interaction.guildId}:${interaction.user.id}`;
         if (ticketCreationLocks.has(creationKey)) {
@@ -2633,7 +2870,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ticketCreationLocks.add(creationKey);
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
-          await openTicket(interaction, sectionId, reason);
+          await openTicket(interaction, sectionId, reason, resolveLang(lang));
         } finally {
           ticketCreationLocks.delete(creationKey);
         }
@@ -2642,7 +2879,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('ticket:panel')) {
+    if (interaction.isStringSelectMenu() && interaction.customId === 'ticket:language') {
+      const lang = resolveLang(interaction.values[0]);
+      const config = getGuildConfig(interaction.guildId);
+      const menu = buildCategoryMenu(config || {}, lang);
+
+      if (!menu) {
+        await interaction.reply({
+          content: 'Ticket setup data is missing. Run /quick-setup to build the panels.',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: UI_STRINGS[lang].languagePrompt,
+        components: [menu],
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('ticket:category:')) {
+      const lang = resolveLang(interaction.customId.split(':')[2]);
       const sectionId = interaction.values[0];
       let config = getGuildConfig(interaction.guildId);
 
@@ -2678,7 +2937,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      await interaction.showModal(createReasonModal(sectionId));
+      await interaction.showModal(createReasonModal(sectionId, lang));
       return;
     }
 
@@ -2737,7 +2996,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           await interaction.deferUpdate();
-          trySetTicketTopicValue(interaction.channel, 'claimedBy', interaction.user.id);
+          const claimedAt = Date.now();
+          trySetTicketTopicValues(
+            interaction.channel,
+            { claimedBy: interaction.user.id, claimedAt },
+            'claim state'
+          );
+          // The response clock starts now, not at the owner's last message
+          // before the claim -- staff have only just picked it up.
+          ticketOwnerActivity.set(interaction.channel.id, claimedAt);
+
           const embed = updateTicketEmbed(interaction, (ticketEmbed) => {
             ticketEmbed.addFields({
               name: 'Claimed by',
@@ -2751,6 +3019,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             components: buildTicketControls('open', interaction.user.id)
           });
 
+          const claimResponseHours = Math.round(CLAIM_RESPONSE_TIMEOUT_MS / 3_600_000);
           const claimTicketNumber = getTicketNumber(interaction.channel) || 'unknown';
           await dmUser(getTicketOwnerId(interaction.channel), {
             embeds: [
@@ -2760,7 +3029,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 .setDescription(
                   `<@${interaction.user.id}> has claimed your ticket in ` +
                   `**${interaction.guild.name}** and is working on it now.\n\n` +
-                  `Channel: <#${interaction.channel.id}>`
+                  `Channel: <#${interaction.channel.id}>\n\n` +
+                  `Please reply within the next **${claimResponseHours} hours** -- ` +
+                  'if there is no reply from you in that time, this ticket will be closed automatically.'
                 )
                 .setFooter({ text: BRAND_FOOTER })
                 .setTimestamp()
@@ -2795,11 +3066,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                   .setColor(0xffff00)
                   .setTitle('Ticket closed')
                   .setDescription(
-                    `Closed by <@${interaction.user.id}>.\n` +
-                    (result.logged.ok
-                      ? 'A full archive has been saved to the ticket log.'
-                      : 'WARNING: no log channel is configured, so nothing was archived. Run /quick-setup.') +
-                    `\n\nThis channel will be deleted in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds.`
+                    `Closed by <@${interaction.user.id}>.\n\n` +
+                    `This channel will be deleted in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds.`
                   )
               ]
             })
@@ -2986,6 +3254,7 @@ module.exports = {
   collectStaffRecipients,
   BRAND_FOOTER,
   ENABLE_GUILD_MEMBERS,
+  ENABLE_MESSAGE_CONTENT,
   positionCategoriesAbove,
   reconcileProvidedChannel,
   BOT_ACTIVITY,
@@ -3011,7 +3280,16 @@ module.exports = {
   TICKET_DELETE_DELAY_MS,
   SUPPORT_CATEGORY_NAME,
   LOG_CHANNEL_NAME,
-  DEFAULT_SECTIONS
+  DEFAULT_SECTIONS,
+  buildCategoryMenu,
+  translateSectionName,
+  resolveLang,
+  omanDateKey,
+  consumeTicketRateLimit,
+  TICKET_DAILY_LIMIT,
+  getTicketClaimedAt,
+  CLAIM_RESPONSE_TIMEOUT_MS,
+  trySetTicketTopicValues
 };
 
 client.login(process.env.DISCORD_TOKEN).catch((error) => {

@@ -282,10 +282,13 @@ async function run() {
   const panelMsg = await livePanelChannel.messages.fetch(liveConfig.messageId);
   const menu = panelMsg.components[0].components[0];
 
-  check('panel placeholder is exactly "Select a Category"',
-    menu.placeholder === 'Select a Category', menu.placeholder);
-  check('panel menu custom id has no flow suffix',
-    menu.customId === 'ticket:panel', menu.customId);
+  check('panel opens the language picker',
+    menu.customId === 'ticket:language', menu.customId);
+  check('panel placeholder prompts for a language',
+    menu.placeholder === 'Choose your language - اختر لغتك المفضلة', menu.placeholder);
+  check('language picker offers English and Arabic',
+    menu.options.map((o) => o.value).sort().join(',') === 'ar,en',
+    menu.options.map((o) => o.value).join(','));
   check('panel carries the branded footer',
     panelMsg.embeds[0]?.footer?.text === bot.BRAND_FOOTER, panelMsg.embeds[0]?.footer?.text);
   check('panel title carries no lifecycle label',
@@ -304,6 +307,52 @@ async function run() {
     check('staff DM degrades to mention-only without the members intent',
       staffTargets.length === 0);
   }
+
+  // -------------------------------------------------------------------------
+  section('6. Bilingual panel, sanitized transcripts, and the daily cap');
+
+  const arMenu = bot.buildCategoryMenu(restored.config, 'ar').toJSON().components[0];
+  check('Arabic category menu id carries the language',
+    arMenu.custom_id === 'ticket:category:ar', arMenu.custom_id);
+  const storeOption = arMenu.options.find((o) =>
+    restored.config.sections.find((s) => s.id === o.value)?.name === 'Store');
+  check('a known default section name is translated to Arabic',
+    bot.translateSectionName('Store', 'ar') === 'المتجر');
+  check('Arabic category option uses the translated label',
+    storeOption?.label === 'المتجر', storeOption?.label);
+  check('an unmapped section name falls back to itself in Arabic',
+    bot.translateSectionName('Some Custom Section', 'ar') === 'Some Custom Section');
+  check('resolveLang defaults anything unrecognised to English',
+    bot.resolveLang('xx') === 'en' && bot.resolveLang('ar') === 'ar');
+
+  const memberCopy = bot.buildTranscriptText(livePanelChannel, [], { includeSystemNotes: false });
+  const staffCopy = bot.buildTranscriptText(livePanelChannel, [], { includeSystemNotes: true });
+  check('member transcript never carries a bot-configuration notice',
+    !memberCopy.includes('Message Content intent'));
+  check('staff transcript can still carry that notice when the intent is off',
+    bot.ENABLE_MESSAGE_CONTENT || staffCopy.includes('Message Content intent'));
+
+  check('Oman date key is a plain YYYY-MM-DD string',
+    /^\d{4}-\d{2}-\d{2}$/.test(bot.omanDateKey()));
+
+  // Consumed against the real test guild's own (already non-null) config,
+  // under a fake user id, then cleaned back up -- never against a throwaway
+  // guild id, which would leave a null entry that crashes the next
+  // resumePendingRenames() sweep (it does not null-check each config).
+  const rateLimitUserId = '000000000000000002';
+  const attempts = [1, 2, 3, 4].map(() =>
+    bot.consumeTicketRateLimit(guild.id, rateLimitUserId, bot.TICKET_DAILY_LIMIT));
+  check(`daily cap allows exactly ${bot.TICKET_DAILY_LIMIT} tickets then blocks the next one`,
+    attempts.slice(0, bot.TICKET_DAILY_LIMIT).every((a) => a.allowed) &&
+    attempts[bot.TICKET_DAILY_LIMIT].allowed === false,
+    JSON.stringify(attempts));
+
+  require('./storage').updateGuildConfig(guild.id, (config) => {
+    if (!config?.ticketRateLimits?.[rateLimitUserId]) return null;
+    const ticketRateLimits = { ...config.ticketRateLimits };
+    delete ticketRateLimits[rateLimitUserId];
+    return { ...config, ticketRateLimits };
+  });
 }
 
 async function main() {
