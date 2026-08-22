@@ -154,6 +154,22 @@ least one channel inside it, so:
 This is why `Manage Roles` is required: those per-channel overwrites are the
 entire mechanism.
 
+## Running more than one instance
+
+A running bot handles every guild its application is in, so two processes
+sharing one bot token — a demo instance beside production — would both answer
+the same interactions, creating two tickets and two DMs for one click. Set
+`GUILD_ID` on each instance to the guild it serves and each ignores the other's.
+Separate directories are not enough on their own; the collision is on the
+gateway, not on disk.
+
+## Deploying an upgrade
+
+The panel's select menu is built from code, so a release that changes it leaves
+the already-posted panel message wired to the previous build. The bot re-edits
+its saved panel at startup to close that gap, so a restart is enough — but if
+the panel message was deleted, run `/quick-setup` to repost it.
+
 ## Ticket lifecycle
 
 1. A member picks a language from the panel, then a category in that
@@ -250,6 +266,7 @@ code never relies on them alone.
 | `TRANSCRIPT_SEND_TO_OWNER` | `true` | DM the member their transcript. |
 | `ENABLE_MESSAGE_CONTENT` | `false` | Privileged intent; puts message text in transcripts. |
 | `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
+| `GUILD_ID` | — | The one guild this instance serves; others are ignored. |
 | `TICKET_DAILY_LIMIT` | `3` | Tickets per day for a non-admin member. Resets at 00:00 Oman time. |
 | `CLAIM_RESPONSE_TIMEOUT_HOURS` | `12` | Hours the member has to reply after claim before auto-close. |
 

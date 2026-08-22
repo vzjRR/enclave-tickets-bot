@@ -163,6 +163,18 @@ const CLAIM_RESPONSE_TIMEOUT_MS = Math.max(
 // claimedAt is the fallback floor rather than a precise clock.
 const ticketOwnerActivity = new Map();
 
+// A deployment serves exactly one guild, but nothing below filters on it --
+// this process handles every guild the application is in. Two processes
+// sharing one bot token (a demo instance beside production, say) would then
+// both answer production's interactions, duplicating tickets and DMs. Setting
+// GUILD_ID confines this process to that guild; leaving it unset keeps the
+// old behaviour of serving them all.
+const ALLOWED_GUILD_ID = process.env.GUILD_ID || null;
+
+function isAllowedGuild(guildId) {
+  return !ALLOWED_GUILD_ID || guildId === ALLOWED_GUILD_ID;
+}
+
 function envFlag(name, fallback) {
   const value = process.env[name];
   if (value === undefined || value === '') return fallback;
@@ -419,6 +431,7 @@ client.on(Events.ShardReconnecting, (shardId) => {
 // reset their clock, so staff chatting in the channel does not.
 client.on(Events.MessageCreate, (message) => {
   if (!message.guild || message.author?.bot) return;
+  if (!isAllowedGuild(message.guild.id)) return;
   if (!isTicketChannel(message.channel)) return;
   if (getTicketOwnerId(message.channel) !== message.author.id) return;
   ticketOwnerActivity.set(message.channel.id, Date.now());
@@ -914,7 +927,7 @@ async function refreshTicketChannel(channel) {
   if (status === 'open' && claimedBy) {
     const claimedAt = getTicketClaimedAt(channel);
     if (claimedAt) {
-      const lastActivity = ticketOwnerActivity.get(channel.id) ?? claimedAt;
+      const lastActivity = await resolveTicketOwnerActivity(channel, claimedAt);
       if (Date.now() - lastActivity >= CLAIM_RESPONSE_TIMEOUT_MS) {
         console.log(
           `Auto-closing ticket ${channel.id}: no reply from the owner for ` +
@@ -973,6 +986,7 @@ async function runAutomaticMaintenance() {
     pruneSetupSessions();
     await resumePendingRenames();
     for (const guild of client.guilds.cache.values()) {
+      if (!isAllowedGuild(guild.id)) continue;
       await refreshGuildTickets(guild, 'automatic').catch((error) => {
         console.error(`Automatic ticket refresh failed for guild ${guild.id}:`, error);
       });
@@ -995,6 +1009,42 @@ function getTicketStatus(channel) {
 function getTicketClaimedBy(channel) {
   const match = channel?.topic?.match(/claimedBy=(\d{17,20})(?![\d])/);
   return match?.[1] || null;
+}
+
+// ticketOwnerActivity is in-memory, so after a restart every claimed ticket
+// would look silent since the moment it was claimed -- and the first sweep
+// runs fifteen seconds after boot, so a deploy would auto-close live tickets
+// whose owner had just replied. On a miss, recover the real figure from the
+// channel's own history: author and timestamp are available without the
+// privileged MessageContent intent, which only gates message text.
+async function resolveTicketOwnerActivity(channel, claimedAt) {
+  const cached = ticketOwnerActivity.get(channel.id);
+  if (cached !== undefined) return cached;
+
+  const ownerId = getTicketOwnerId(channel);
+  let lastActivity = claimedAt;
+
+  if (ownerId) {
+    try {
+      const messages = await withTimeout(
+        channel.messages.fetch({ limit: 100 }),
+        `Fetch recent messages for ${channel.id}`,
+        8_000
+      );
+      for (const message of messages.values()) {
+        if (message.author?.id !== ownerId) continue;
+        if (message.createdTimestamp > lastActivity) lastActivity = message.createdTimestamp;
+      }
+    } catch (error) {
+      // Falling back to claimedAt would close the ticket on a transient fetch
+      // failure, so treat the deadline as not yet reached instead.
+      console.error(`Failed to recover owner activity for ${channel.id}:`, error?.message || error);
+      return Date.now();
+    }
+  }
+
+  ticketOwnerActivity.set(channel.id, lastActivity);
+  return lastActivity;
 }
 
 function getTicketClaimedAt(channel) {
@@ -1414,6 +1464,34 @@ async function updateSavedPanel(guild, config) {
 
   await message.edit({ embeds: [buildPanelEmbed(config)], components: [menu] });
   return { ok: true, channel, message };
+}
+
+// The panel's select menu is built from code, so a deploy that changes its
+// custom id leaves the already-posted message wired to a handler that no
+// longer exists -- every member clicking it gets "This interaction failed"
+// until someone runs /quick-setup. Re-editing it at startup closes that
+// window. updateSavedPanel edits in place, so this is idempotent.
+async function resyncSavedPanels() {
+  for (const guild of client.guilds.cache.values()) {
+    if (!isAllowedGuild(guild.id)) continue;
+
+    const config = getGuildConfig(guild.id);
+    if (!config) continue;
+
+    const result = await updateSavedPanel(guild, config).catch((error) => {
+      console.error(`Failed to resync the panel for guild ${guild.id}:`, error?.message || error);
+      return { ok: false, reason: 'error' };
+    });
+
+    if (result.ok) {
+      console.log(`Ticket panel resynced for guild ${guild.id}.`);
+    } else if (result.reason !== 'missing_panel') {
+      console.warn(
+        `Ticket panel not resynced for guild ${guild.id}: ${result.reason}. ` +
+        'Run /quick-setup to repost it.'
+      );
+    }
+  }
 }
 
 async function resendSavedPanel(interaction) {
@@ -2626,11 +2704,18 @@ client.once(Events.ClientReady, (readyClient) => {
     });
     console.log(`Presence set to: ${BOT_ACTIVITY}`);
   }
+  resyncSavedPanels().catch((error) => {
+    console.error('Failed to resync saved ticket panels:', error);
+  });
+
   setTimeout(() => runAutomaticMaintenance().catch(console.error), 15_000);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // Silently ignore other guilds rather than replying: if a second process
+    // is serving them, answering here would be the duplicate response.
+    if (interaction.guildId && !isAllowedGuild(interaction.guildId)) return;
     if (interaction.isChatInputCommand()) {
       if (GUILD_MANAGER_COMMANDS.has(interaction.commandName) && !hasGuildManagerPermission(interaction)) {
         await interaction.reply({
@@ -3289,7 +3374,13 @@ module.exports = {
   TICKET_DAILY_LIMIT,
   getTicketClaimedAt,
   CLAIM_RESPONSE_TIMEOUT_MS,
-  trySetTicketTopicValues
+  trySetTicketTopicValues,
+  TICKET_MARKER,
+  isAllowedGuild,
+  ALLOWED_GUILD_ID,
+  resolveTicketOwnerActivity,
+  resyncSavedPanels,
+  ticketOwnerActivity
 };
 
 client.login(process.env.DISCORD_TOKEN).catch((error) => {

@@ -353,6 +353,76 @@ async function run() {
     delete ticketRateLimits[rateLimitUserId];
     return { ...config, ticketRateLimits };
   });
+
+  // -------------------------------------------------------------------------
+  section('7. Deploy safety: guild gate, panel resync, claim clock across restart');
+
+  check('this process only serves the guild named by GUILD_ID',
+    bot.isAllowedGuild(guild.id) === true && bot.isAllowedGuild('999999999999999999') === false,
+    `ALLOWED_GUILD_ID=${bot.ALLOWED_GUILD_ID}`);
+
+  // A panel posted by an older build still carries that build's custom id, and
+  // nothing rebuilds it on a deploy. Rewind the live message to the pre-
+  // bilingual menu, then confirm startup repairs it with no /quick-setup run.
+  await (await livePanelChannel.messages.fetch({ message: liveConfig.messageId, force: true })).edit({
+    components: [{
+      type: 1,
+      components: [{
+        type: 3,
+        custom_id: 'ticket:panel',
+        placeholder: 'Select a Category',
+        options: [{ label: 'Stale', value: restored.config.sections[0].id }]
+      }]
+    }]
+  });
+
+  const beforeResync = await livePanelChannel.messages.fetch({ message: liveConfig.messageId, force: true });
+  check('panel can be rewound to a pre-upgrade menu',
+    beforeResync.components[0].components[0].customId === 'ticket:panel',
+    beforeResync.components[0].components[0].customId);
+
+  await bot.resyncSavedPanels();
+
+  const afterResync = await livePanelChannel.messages.fetch({ message: liveConfig.messageId, force: true });
+  const repaired = afterResync.components[0].components[0];
+  check('startup resync repairs a stale panel without /quick-setup',
+    repaired.customId === 'ticket:language', repaired.customId);
+  check('the repaired panel offers both languages again',
+    repaired.options.map((o) => o.value).sort().join(',') === 'ar,en',
+    repaired.options.map((o) => o.value).join(','));
+
+  // The claim clock lives in memory, and the first sweep runs fifteen seconds
+  // after boot -- so a restart must not read a ticket whose owner just replied
+  // as silent since the claim. The bot is the only account this suite can post
+  // as, so it stands in as the ticket owner.
+  const claimedAt = Date.now() - 60 * 60 * 1000;
+  const clockChannel = await guild.channels.create({
+    name: 'selftest-claim-clock',
+    type: ChannelType.GuildText,
+    topic: `${bot.TICKET_MARKER} | owner=${client.user.id} | status=open | ` +
+      `claimedBy=${client.user.id} | claimedAt=${claimedAt} | ticketNumber=9001`
+  });
+  cleanup.push(clockChannel);
+
+  bot.ticketOwnerActivity.delete(clockChannel.id);
+  const noReply = await bot.resolveTicketOwnerActivity(clockChannel, claimedAt);
+  check('with no owner reply the clock stays at the claim time',
+    noReply === claimedAt, `${noReply} vs claim ${claimedAt}`);
+
+  const ownerMsg = await clockChannel.send('owner reply, after the claim');
+  bot.ticketOwnerActivity.delete(clockChannel.id);
+  const recovered = await bot.resolveTicketOwnerActivity(clockChannel, claimedAt);
+  check('after a restart the clock is recovered from history, not the claim time',
+    recovered === ownerMsg.createdTimestamp && recovered > claimedAt,
+    `${recovered} vs msg ${ownerMsg.createdTimestamp}, claim ${claimedAt}`);
+  check('a ticket whose owner just replied is not past the claim deadline',
+    Date.now() - recovered < bot.CLAIM_RESPONSE_TIMEOUT_MS);
+
+  const sentinel = 4102444800000;
+  bot.ticketOwnerActivity.set(clockChannel.id, sentinel);
+  check('an in-memory clock value short-circuits the history fetch',
+    (await bot.resolveTicketOwnerActivity(clockChannel, claimedAt)) === sentinel);
+  bot.ticketOwnerActivity.delete(clockChannel.id);
 }
 
 async function main() {
