@@ -4,6 +4,12 @@ Documentation=https://github.com/vzjRR/enclave-tickets-bot
 After=network-online.target
 Wants=network-online.target
 
+# These are [Unit] directives, not [Service] ones. In [Service] systemd logs
+# "Unknown key name" and ignores them, which silently leaves the bot able to
+# restart forever against a broken build.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=simple
 User=discordbots
@@ -19,8 +25,6 @@ ExecStart=/usr/bin/node src/index.js
 # exception precisely so this can restart it with clean state.
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 # It only needs to read its own directory and write data/.
 NoNewPrivileges=true
