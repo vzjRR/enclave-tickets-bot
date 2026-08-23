@@ -151,6 +151,7 @@ function resolveLang(value) {
 // A section added later via /ticket-section-add keeps whatever name staff
 // gave it in both languages -- there is nowhere to store a translation for it.
 const SECTION_NAME_TRANSLATIONS = {
+  'Soon': 'قريبًا',
   'Inquiries': 'استفسارات',
   'Technical Issue': 'مشكلة تقنية',
   'Reports': 'بلاغات',
@@ -2233,13 +2234,11 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
 // running it twice does not duplicate anything.
 // ---------------------------------------------------------------------------
 
+// Placeholder for the LSPD deployment -- the real section list hasn't been
+// decided yet. Swap this back to the full list (or add more via
+// /ticket-section-add) once it has, and re-run /quick-setup.
 const DEFAULT_SECTIONS = [
-  { name: 'Inquiries', emoji: '❓' },
-  { name: 'Technical Issue', emoji: '⚠️' },
-  { name: 'Reports', emoji: '🕵️' },
-  { name: 'Ban Appeal', emoji: '⛔' },
-  { name: 'Compensation', emoji: '💸' },
-  { name: 'Store', emoji: '💰' }
+  { name: 'Soon', emoji: '🔜' }
 ];
 
 const STAFF_ROLE_NAME = 'Ticket Staff';
