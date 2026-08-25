@@ -68,7 +68,37 @@ const UI_STRINGS = {
     reasonModalTitle: 'Open Ticket',
     reasonLabel: 'Write your concern:',
     rateLimited: (limit) =>
-      `You have reached the daily limit of ${limit} tickets. You can open another after 00:00 (Oman time).`
+      `You have reached the daily limit of ${limit} tickets. You can open another after 00:00 (Oman time).`,
+    setupMissing: 'Ticket setup is not ready yet. Please ask an admin.',
+    sectionGone: 'That ticket category is not configured anymore. Ask an admin to refresh the panel.',
+    alreadyOpen: (channelId) => `You already have an open ticket: <#${channelId}>`,
+    openedTitle: (number) => `Ticket #${number} created`,
+    openedBody: (sectionName, guildName, channelId) =>
+      `Your **${sectionName}** ticket in **${guildName}** is open.\n\n` +
+      `Channel: <#${channelId}>\n\n` +
+      'The support team has been notified. You will get another message here when a staff member picks it up.',
+    yourMessage: 'Your message',
+    dmFailed: 'I could not DM you a confirmation. Enable direct messages from server members if you want ticket updates.',
+    openedBy: 'Opened by',
+    category: 'Category',
+    ticketNumber: 'Ticket number',
+    openedAt: 'Opened at',
+    claimedTitle: (number) => `Ticket #${number} is being handled`,
+    claimedBody: (staffId, guildName, channelId, hours) =>
+      `<@${staffId}> has claimed your ticket in **${guildName}** and is working on it now.\n\n` +
+      `Channel: <#${channelId}>\n\n` +
+      `Please reply within the next **${hours} hours** -- ` +
+      'if there is no reply from you in that time, this ticket will be closed automatically.',
+    closedTitle: 'Ticket Closed',
+    closedOpenedBy: 'Opened By',
+    closedClaimedBy: 'Claimed By',
+    closedClosedBy: 'Closed By',
+    closedOpenTime: 'Open Time',
+    closedCloseTime: 'Close Time',
+    noOne: 'No one',
+    unknown: 'Unknown',
+    viewTicket: 'View Ticket',
+    openNewTicket: 'Open a New Ticket'
   },
   ar: {
     languagePrompt: 'اختر الفئة التي تطابق مشكلتك:',
@@ -77,9 +107,43 @@ const UI_STRINGS = {
     reasonModalTitle: 'فتح تذكرة',
     reasonLabel: 'اكتب استفسارك:',
     rateLimited: (limit) =>
-      `لقد وصلت إلى الحد الأقصى اليومي وهو ${limit} تذاكر. يمكنك فتح تذكرة أخرى بعد الساعة ٠٠:٠٠ بتوقيت عمان.`
+      `لقد وصلت إلى الحد الأقصى اليومي وهو ${limit} تذاكر. يمكنك فتح تذكرة أخرى بعد الساعة ٠٠:٠٠ بتوقيت عمان.`,
+    setupMissing: 'نظام التذاكر غير جاهز بعد. يرجى التواصل مع الإدارة.',
+    sectionGone: 'هذه الفئة لم تعد متاحة. يرجى الطلب من الإدارة تحديث اللوحة.',
+    alreadyOpen: (channelId) => `لديك تذكرة مفتوحة بالفعل: <#${channelId}>`,
+    openedTitle: (number) => `تم إنشاء التذكرة رقم #${number}`,
+    openedBody: (sectionName, guildName, channelId) =>
+      `تم فتح تذكرتك في قسم **${sectionName}** في سيرفر **${guildName}**.\n\n` +
+      `القناة: <#${channelId}>\n\n` +
+      'تم إشعار فريق الدعم. ستصلك رسالة أخرى هنا عندما يستلم أحد أعضاء الفريق تذكرتك.',
+    yourMessage: 'رسالتك',
+    dmFailed: 'لم أتمكن من إرسال رسالة تأكيد لك. فعّل الرسائل المباشرة من أعضاء السيرفر إذا كنت تريد تحديثات التذكرة.',
+    openedBy: 'فتحها',
+    category: 'الفئة',
+    ticketNumber: 'رقم التذكرة',
+    openedAt: 'وقت الفتح',
+    claimedTitle: (number) => `جاري العمل على التذكرة رقم #${number}`,
+    claimedBody: (staffId, guildName, channelId, hours) =>
+      `قام <@${staffId}> باستلام تذكرتك في سيرفر **${guildName}** ويعمل عليها الآن.\n\n` +
+      `القناة: <#${channelId}>\n\n` +
+      `يرجى الرد خلال **${hours} ساعة** -- ` +
+      'إذا لم يصل رد منك خلال هذه المدة، سيتم إغلاق التذكرة تلقائياً.',
+    closedTitle: 'تم إغلاق التذكرة',
+    closedOpenedBy: 'فتحها',
+    closedClaimedBy: 'استلمها',
+    closedClosedBy: 'أغلقها',
+    closedOpenTime: 'وقت الفتح',
+    closedCloseTime: 'وقت الإغلاق',
+    noOne: 'لا أحد',
+    unknown: 'غير معروف',
+    viewTicket: 'عرض التذكرة',
+    openNewTicket: 'فتح تذكرة جديدة'
   }
 };
+
+function t(lang) {
+  return UI_STRINGS[resolveLang(lang)];
+}
 
 function resolveLang(value) {
   return value === 'ar' ? 'ar' : 'en';
@@ -165,6 +229,18 @@ const CLAIM_RESPONSE_TIMEOUT_MS = Math.max(
 // "no activity since claim" -- the conservative direction, since the topic's
 // claimedAt is the fallback floor rather than a precise clock.
 const ticketOwnerActivity = new Map();
+
+// A deployment serves exactly one guild, but nothing below filters on it --
+// this process handles every guild the application is in. Two processes
+// sharing one bot token (a demo instance beside production, say) would then
+// both answer production's interactions, duplicating tickets and DMs. Setting
+// GUILD_ID confines this process to that guild; leaving it unset keeps the
+// old behaviour of serving them all.
+const ALLOWED_GUILD_ID = process.env.GUILD_ID || null;
+
+function isAllowedGuild(guildId) {
+  return !ALLOWED_GUILD_ID || guildId === ALLOWED_GUILD_ID;
+}
 
 function envFlag(name, fallback) {
   const value = process.env[name];
@@ -436,6 +512,7 @@ client.on(Events.ShardReconnecting, (shardId) => {
 // reset their clock, so staff chatting in the channel does not.
 client.on(Events.MessageCreate, (message) => {
   if (!message.guild || message.author?.bot) return;
+  if (!isAllowedGuild(message.guild.id)) return;
   if (!isTicketChannel(message.channel)) return;
   if (getTicketOwnerId(message.channel) !== message.author.id) return;
   ticketOwnerActivity.set(message.channel.id, Date.now());
@@ -931,7 +1008,7 @@ async function refreshTicketChannel(channel) {
   if (status === 'open' && claimedBy) {
     const claimedAt = getTicketClaimedAt(channel);
     if (claimedAt) {
-      const lastActivity = ticketOwnerActivity.get(channel.id) ?? claimedAt;
+      const lastActivity = await resolveTicketOwnerActivity(channel, claimedAt);
       if (Date.now() - lastActivity >= CLAIM_RESPONSE_TIMEOUT_MS) {
         console.log(
           `Auto-closing ticket ${channel.id}: no reply from the owner for ` +
@@ -990,6 +1067,7 @@ async function runAutomaticMaintenance() {
     pruneSetupSessions();
     await resumePendingRenames();
     for (const guild of client.guilds.cache.values()) {
+      if (!isAllowedGuild(guild.id)) continue;
       await refreshGuildTickets(guild, 'automatic').catch((error) => {
         console.error(`Automatic ticket refresh failed for guild ${guild.id}:`, error);
       });
@@ -1012,6 +1090,50 @@ function getTicketStatus(channel) {
 function getTicketClaimedBy(channel) {
   const match = channel?.topic?.match(/claimedBy=(\d{17,20})(?![\d])/);
   return match?.[1] || null;
+}
+
+// ticketOwnerActivity is in-memory, so after a restart every claimed ticket
+// would look silent since the moment it was claimed -- and the first sweep
+// runs fifteen seconds after boot, so a deploy would auto-close live tickets
+// whose owner had just replied. On a miss, recover the real figure from the
+// channel's own history: author and timestamp are available without the
+// privileged MessageContent intent, which only gates message text.
+async function resolveTicketOwnerActivity(channel, claimedAt) {
+  const cached = ticketOwnerActivity.get(channel.id);
+  if (cached !== undefined) return cached;
+
+  const ownerId = getTicketOwnerId(channel);
+  let lastActivity = claimedAt;
+
+  if (ownerId) {
+    try {
+      const messages = await withTimeout(
+        channel.messages.fetch({ limit: 100 }),
+        `Fetch recent messages for ${channel.id}`,
+        8_000
+      );
+      for (const message of messages.values()) {
+        if (message.author?.id !== ownerId) continue;
+        if (message.createdTimestamp > lastActivity) lastActivity = message.createdTimestamp;
+      }
+    } catch (error) {
+      // Falling back to claimedAt would close the ticket on a transient fetch
+      // failure, so treat the deadline as not yet reached instead.
+      console.error(`Failed to recover owner activity for ${channel.id}:`, error?.message || error);
+      return Date.now();
+    }
+  }
+
+  ticketOwnerActivity.set(channel.id, lastActivity);
+  return lastActivity;
+}
+
+// The language the member picked in the panel, carried on the ticket so that a
+// claim or close hours later still speaks to them in it. Written once when the
+// channel is created, so it costs no extra channel edit against Discord's
+// roughly-two-per-ten-minutes topic limit.
+function getTicketLang(channel) {
+  return resolveLang(channel?.topic?.match(/lang=([a-z]{2})/)?.[1]);
 }
 
 function getTicketClaimedAt(channel) {
@@ -1433,6 +1555,34 @@ async function updateSavedPanel(guild, config) {
   return { ok: true, channel, message };
 }
 
+// The panel's select menu is built from code, so a deploy that changes its
+// custom id leaves the already-posted message wired to a handler that no
+// longer exists -- every member clicking it gets "This interaction failed"
+// until someone runs /quick-setup. Re-editing it at startup closes that
+// window. updateSavedPanel edits in place, so this is idempotent.
+async function resyncSavedPanels() {
+  for (const guild of client.guilds.cache.values()) {
+    if (!isAllowedGuild(guild.id)) continue;
+
+    const config = getGuildConfig(guild.id);
+    if (!config) continue;
+
+    const result = await updateSavedPanel(guild, config).catch((error) => {
+      console.error(`Failed to resync the panel for guild ${guild.id}:`, error?.message || error);
+      return { ok: false, reason: 'error' };
+    });
+
+    if (result.ok) {
+      console.log(`Ticket panel resynced for guild ${guild.id}.`);
+    } else if (result.reason !== 'missing_panel') {
+      console.warn(
+        `Ticket panel not resynced for guild ${guild.id}: ${result.reason}. ` +
+        'Run /quick-setup to repost it.'
+      );
+    }
+  }
+}
+
 async function resendSavedPanel(interaction) {
   const config = getGuildConfig(interaction.guildId);
 
@@ -1653,20 +1803,24 @@ async function writeTicketLog(channel, closedById, reason, { messages, transcrip
 // The "Ticket Closed" card: server icon and name in the author line, a 3 + 2
 // grid of inline fields, and Discord-rendered timestamps (the <t:...:F> form
 // renders as "Friday, August 21, 2026 8:07 PM" with the highlighted background).
-function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt, closedAt }) {
+// lang defaults to English on purpose: the archive in the staff log channel
+// calls this without one, so a staff record stays in a single language whoever
+// opened the ticket. Only the member's own copy is localised.
+function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt, closedAt, lang = 'en' }) {
+  const ui = t(lang);
   const embed = new EmbedBuilder()
     .setColor(CLOSED_CARD_COLOR)
     .setAuthor({
       name: guild.name,
       iconURL: guild.iconURL({ size: 128 }) || client.user?.displayAvatarURL({ size: 128 })
     })
-    .setTitle('Ticket Closed')
+    .setTitle(ui.closedTitle)
     .addFields(
-      { name: 'Opened By', value: ownerId ? `<@${ownerId}>` : 'Unknown', inline: true },
-      { name: 'Claimed By', value: claimedBy ? `<@${claimedBy}>` : 'No one', inline: true },
-      { name: 'Closed By', value: closedById ? `<@${closedById}>` : 'Unknown', inline: true },
-      { name: 'Open Time', value: `<t:${Math.floor(openedAt / 1000)}:F>`, inline: true },
-      { name: 'Close Time', value: `<t:${Math.floor(closedAt / 1000)}:F>`, inline: true }
+      { name: ui.closedOpenedBy, value: ownerId ? `<@${ownerId}>` : ui.unknown, inline: true },
+      { name: ui.closedClaimedBy, value: claimedBy ? `<@${claimedBy}>` : ui.noOne, inline: true },
+      { name: ui.closedClosedBy, value: closedById ? `<@${closedById}>` : ui.unknown, inline: true },
+      { name: ui.closedOpenTime, value: `<t:${Math.floor(openedAt / 1000)}:F>`, inline: true },
+      { name: ui.closedCloseTime, value: `<t:${Math.floor(closedAt / 1000)}:F>`, inline: true }
     );
 
   const thumbnail = isHttpUrl(CLOSED_CARD_THUMBNAIL)
@@ -1680,7 +1834,8 @@ function buildClosedTicketCard({ guild, ownerId, claimedBy, closedById, openedAt
 // A link button only earns its place if the destination actually opens for the
 // person receiving it. Staff get the archived log entry; the member, who cannot
 // see the log channel, gets the panel so they can open a fresh ticket.
-async function buildClosedTicketLink(guild, recipientId, logMessage) {
+async function buildClosedTicketLink(guild, recipientId, logMessage, lang = 'en') {
+  const ui = t(lang);
   const config = getGuildConfig(guild.id);
 
   if (logMessage && config?.logChannelId) {
@@ -1690,7 +1845,7 @@ async function buildClosedTicketLink(guild, recipientId, logMessage) {
     if (logChannel && member && logChannel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel)) {
       return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setLabel('View Ticket')
+          .setLabel(ui.viewTicket)
           .setStyle(ButtonStyle.Link)
           .setURL(logMessage.url)
       );
@@ -1700,7 +1855,7 @@ async function buildClosedTicketLink(guild, recipientId, logMessage) {
   if (config?.channelId) {
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setLabel('Open a New Ticket')
+        .setLabel(ui.openNewTicket)
         .setStyle(ButtonStyle.Link)
         .setURL(`https://discord.com/channels/${guild.id}/${config.channelId}`)
     );
@@ -1729,8 +1884,10 @@ async function closeAndArchiveTicket(channel, closedById) {
   const logged = await writeTicketLog(channel, closedById, reason, { messages, transcript });
 
   if (ownerId) {
+    const ownerLang = getTicketLang(channel);
     const card = buildClosedTicketCard({
       guild: channel.guild,
+      lang: ownerLang,
       ownerId,
       claimedBy: getTicketClaimedBy(channel),
       closedById,
@@ -1738,7 +1895,7 @@ async function closeAndArchiveTicket(channel, closedById) {
       closedAt: Date.now()
     }).setFooter({ text: BRAND_FOOTER });
 
-    const row = await buildClosedTicketLink(channel.guild, ownerId, logged.message);
+    const row = await buildClosedTicketLink(channel.guild, ownerId, logged.message, ownerLang);
 
     // A shared log channel cannot show one member only their own entry, so
     // the member is sent their own transcript instead of being given access
@@ -1875,7 +2032,7 @@ async function notifyStaffOfNewTicket({ guild, section, channel, user, reason, t
   return { attempted: recipients.length, delivered, skipped: false };
 }
 
-async function createTicket({ guild, user, section, reason, config }) {
+async function createTicket({ guild, user, section, reason, config, lang = 'en' }) {
   const everyoneId = guild.roles.everyone.id;
 
   // Reserve the number under a per-guild lock. Read-increment-write without one
@@ -1930,21 +2087,26 @@ async function createTicket({ guild, user, section, reason, config }) {
     name: channelName,
     type: ChannelType.GuildText,
     parent: section.categoryId,
-    topic: `${TICKET_MARKER} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | status=open`,
+    topic: `${TICKET_MARKER} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | lang=${resolveLang(lang)} | status=open`,
     permissionOverwrites
   });
 
   const staffMentions = section.roleIds.map((roleId) => `<@&${roleId}>`).join(' ');
   const openedAt = Math.floor(Date.now() / 1000);
+  // This embed sits in the member's own ticket and is addressed to them, so it
+  // follows their language. Staff keep an English record either way: the staff
+  // alert DM and the archive written to the log channel are both unlocalised.
+  const ui = t(lang);
+  const localSectionName = translateSectionName(section.name, lang);
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
-    .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${section.name}`)
+    .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${localSectionName}`)
     .setDescription(reason)
     .addFields(
-      { name: 'Opened by', value: `<@${user.id}>`, inline: true },
-      { name: 'Category', value: section.name, inline: true },
-      { name: 'Ticket number', value: `#${ticketNumber}`, inline: true },
-      { name: 'Opened at', value: `<t:${openedAt}:f>`, inline: true }
+      { name: ui.openedBy, value: `<@${user.id}>`, inline: true },
+      { name: ui.category, value: localSectionName, inline: true },
+      { name: ui.ticketNumber, value: `#${ticketNumber}`, inline: true },
+      { name: ui.openedAt, value: `<t:${openedAt}:f>`, inline: true }
     )
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
@@ -1986,13 +2148,9 @@ async function createTicket({ guild, user, section, reason, config }) {
     embeds: [
       new EmbedBuilder()
         .setColor(config.color || BRAND_COLOR)
-        .setTitle(`Ticket #${ticketNumber} created`)
-        .setDescription(
-          `Your **${section.name}** ticket in **${guild.name}** is open.\n\n` +
-          `Channel: <#${channel.id}>\n\n` +
-          'The support team has been notified. You will get another message here when a staff member picks it up.'
-        )
-        .addFields({ name: 'Your message', value: reason.slice(0, 1024) })
+        .setTitle(ui.openedTitle(ticketNumber))
+        .setDescription(ui.openedBody(localSectionName, guild.name, channel.id))
+        .addFields({ name: ui.yourMessage, value: reason.slice(0, 1024) })
         .setFooter({ text: BRAND_FOOTER })
         .setTimestamp()
     ]
@@ -2001,9 +2159,7 @@ async function createTicket({ guild, user, section, reason, config }) {
   if (!notified) {
     // Their DMs are closed, so say it in the ticket instead.
     await channel.send({
-      content:
-        `<@${user.id}> I could not DM you a confirmation. ` +
-        'Enable direct messages from server members if you want ticket updates.'
+      content: `<@${user.id}> ${ui.dmFailed}`
     }).catch(() => {});
   }
 
@@ -2014,8 +2170,11 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
   let config = getGuildConfig(interaction.guildId);
 
   if (!config?.sections?.length) {
+    // Member-facing, so it says nothing about the bot's own configuration --
+    // that operational detail goes to the console for staff instead.
+    console.error(`Ticket attempted in ${interaction.guildId} with no sections configured. Run /quick-setup.`);
     await sendInteractionResult(interaction, {
-      content: 'Ticket setup data is missing. Run /quick-setup to build the panels.',
+      content: t(lang).setupMissing,
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2025,7 +2184,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
 
   if (!section) {
     await sendInteractionResult(interaction, {
-      content: 'That ticket section is not configured anymore.',
+      content: t(lang).sectionGone,
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2041,7 +2200,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
 
   if (existingTicket) {
     await sendInteractionResult(interaction, {
-      content: `You already have an open ticket: <#${existingTicket.id}>`,
+      content: t(lang).alreadyOpen(existingTicket.id),
       flags: MessageFlags.Ephemeral
     });
     return;
@@ -2051,7 +2210,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
     const { allowed } = consumeTicketRateLimit(interaction.guildId, interaction.user.id, TICKET_DAILY_LIMIT);
     if (!allowed) {
       await sendInteractionResult(interaction, {
-        content: UI_STRINGS[resolveLang(lang)].rateLimited(TICKET_DAILY_LIMIT),
+        content: t(lang).rateLimited(TICKET_DAILY_LIMIT),
         flags: MessageFlags.Ephemeral
       });
       return;
@@ -2061,6 +2220,7 @@ async function openTicket(interaction, sectionId, reason, lang = 'en') {
   const result = await createTicket({
     guild: interaction.guild,
     user: interaction.user,
+    lang,
     section,
     reason,
     config
@@ -2646,19 +2806,34 @@ client.once(Events.ClientReady, (readyClient) => {
     console.log(`Presence set to: ${BOT_ACTIVITY}`);
   }
 
-  if (streamerApplications.isConfigured()) {
-    for (const guild of readyClient.guilds.cache.values()) {
-      streamerApplications.ensureProvisionedForGuild(guild).catch((error) => {
-        console.error(`Failed to provision the Streamer Application section for ${guild.id}:`, error);
-      });
+  // Sequential on purpose: provisioning the Streamer Application section
+  // mutates the saved config, and resyncSavedPanels() reads that config fresh
+  // -- running them concurrently would race and could resync the panel one
+  // edit too early, before the new section is in it.
+  (async () => {
+    if (streamerApplications.isConfigured()) {
+      for (const guild of readyClient.guilds.cache.values()) {
+        if (!isAllowedGuild(guild.id)) continue;
+        await streamerApplications.ensureProvisionedForGuild(guild).catch((error) => {
+          console.error(`Failed to provision the Streamer Application section for ${guild.id}:`, error);
+        });
+      }
     }
-  }
+
+    await resyncSavedPanels().catch((error) => {
+      console.error('Failed to resync saved ticket panels:', error);
+    });
+  })();
 
   setTimeout(() => runAutomaticMaintenance().catch(console.error), 15_000);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // Silently ignore other guilds rather than replying: if a second process
+    // is serving them, answering here would be the duplicate response.
+    if (interaction.guildId && !isAllowedGuild(interaction.guildId)) return;
+
     if (streamerApplications.isStreamerAppInteraction(interaction)) {
       await streamerApplications.handleInteraction(interaction);
       return;
@@ -2939,8 +3114,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       let config = getGuildConfig(interaction.guildId);
 
       if (!config?.sections?.length) {
+        console.error(`Category picked in ${interaction.guildId} with no sections configured. Run /quick-setup.`);
         await interaction.reply({
-          content: 'Ticket setup data is missing. Run /setup again and publish a new panel.',
+          content: t(lang).setupMissing,
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -2953,7 +3129,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const selectedSection = config.sections.find((item) => item.id === sectionId);
       if (!selectedSection) {
         await interaction.reply({
-          content: 'That ticket category is not configured anymore. Ask an admin to refresh the panel.',
+          content: t(lang).sectionGone,
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -2964,7 +3140,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       );
       if (existingTicket) {
         await interaction.reply({
-          content: `You already have a ticket: <#${existingTicket.id}>`,
+          content: t(lang).alreadyOpen(existingTicket.id),
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -3000,7 +3176,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           user: interaction.user,
           section: selectedSection,
           reason: 'طلب انضمام كستريمر (Streamer Application)',
-          config
+          config,
+          // The wizard's 46 questions are Arabic-only by spec, so the
+          // surrounding ticket chrome (embed, confirmation DM) matches
+          // rather than mixing English chrome around an Arabic form.
+          lang: 'ar'
         });
 
         if (!result) {
@@ -3097,18 +3277,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const claimResponseHours = Math.round(CLAIM_RESPONSE_TIMEOUT_MS / 3_600_000);
           const claimTicketNumber = getTicketNumber(interaction.channel) || 'unknown';
+          const claimUi = t(getTicketLang(interaction.channel));
           await dmUser(getTicketOwnerId(interaction.channel), {
             embeds: [
               new EmbedBuilder()
                 .setColor(0x2ecc71)
-                .setTitle(`Ticket #${claimTicketNumber} is being handled`)
-                .setDescription(
-                  `<@${interaction.user.id}> has claimed your ticket in ` +
-                  `**${interaction.guild.name}** and is working on it now.\n\n` +
-                  `Channel: <#${interaction.channel.id}>\n\n` +
-                  `Please reply within the next **${claimResponseHours} hours** -- ` +
-                  'if there is no reply from you in that time, this ticket will be closed automatically.'
-                )
+                .setTitle(claimUi.claimedTitle(claimTicketNumber))
+                .setDescription(claimUi.claimedBody(
+                  interaction.user.id,
+                  interaction.guild.name,
+                  interaction.channel.id,
+                  claimResponseHours
+                ))
                 .setFooter({ text: BRAND_FOOTER })
                 .setTimestamp()
             ]
@@ -3365,7 +3545,17 @@ module.exports = {
   TICKET_DAILY_LIMIT,
   getTicketClaimedAt,
   CLAIM_RESPONSE_TIMEOUT_MS,
-  trySetTicketTopicValues
+  trySetTicketTopicValues,
+  TICKET_MARKER,
+  UI_STRINGS,
+  getTicketLang,
+  buildClosedTicketCard,
+  buildClosedTicketLink,
+  isAllowedGuild,
+  ALLOWED_GUILD_ID,
+  resolveTicketOwnerActivity,
+  resyncSavedPanels,
+  ticketOwnerActivity
 };
 
 client.login(process.env.DISCORD_TOKEN).catch((error) => {

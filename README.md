@@ -28,9 +28,11 @@ Support Center                 visible to everyone
   applicant through a 46-question, 7-stage form (in Arabic), then routes the
   result to a staff review channel with Approve / Reject / Request More
   Information. See [Streamer Application](#streamer-application) below.
-- **Bilingual panel.** The panel embed and the language picker are shown in
-  English and Arabic together; after a member picks one, the category list
-  itself is re-rendered in that language.
+- **Bilingual, end to end.** The panel embed and the language picker are shown
+  in English and Arabic together. Once a member picks one, *everything the bot
+  sends that member* is in it: the category list, the reason modal, every
+  ephemeral reply, the embed in their ticket, and the confirmation, claim and
+  closing DMs that follow hours later. Staff records stay in English.
 - **A daily cap on tickets.** Non-admin members (including ticket staff
   without Administrator) can open a limited number of tickets per day,
   resetting at midnight Oman time.
@@ -158,6 +160,22 @@ least one channel inside it, so:
 This is why `Manage Roles` is required: those per-channel overwrites are the
 entire mechanism.
 
+## Running more than one instance
+
+A running bot handles every guild its application is in, so two processes
+sharing one bot token — a demo instance beside production — would both answer
+the same interactions, creating two tickets and two DMs for one click. Set
+`GUILD_ID` on each instance to the guild it serves and each ignores the other's.
+Separate directories are not enough on their own; the collision is on the
+gateway, not on disk.
+
+## Deploying an upgrade
+
+The panel's select menu is built from code, so a release that changes it leaves
+the already-posted panel message wired to the previous build. The bot re-edits
+its saved panel at startup to close that gap, so a restart is enough — but if
+the panel message was deleted, run `/quick-setup` to repost it.
+
 ## Ticket lifecycle
 
 1. A member picks a language from the panel, then a category in that
@@ -187,9 +205,18 @@ category list again, in that language. Only the section names /quick-setup
 ships (Inquiries, Technical Issue, Reports, Ban Appeal, Compensation, Store)
 have a stored Arabic label; a section added later via `/ticket-section-add`
 shows the same name in both, since there is nowhere to store a translation
-for a custom name. Language only affects that picker and the reason modal —
-the ticket channel itself, its embeds and the transcript stay in the
-section's own configured name.
+for a custom name.
+
+The choice is written onto the ticket itself (`lang=` in the channel topic),
+so a claim or a close hours later still reaches the member in their own
+language. It costs no extra channel edit — it is written once, with the rest
+of the topic, when the channel is created.
+
+**What stays English, deliberately:** the alert DMed to staff, and the archive
+written to the log channel. Those are a staff record, and a record that
+switches language depending on who opened the ticket is harder to read back,
+not easier. The member's own copy of the closing card and their transcript
+follow their language.
 
 ### Claim-response timeout
 
@@ -254,6 +281,7 @@ code never relies on them alone.
 | `TRANSCRIPT_SEND_TO_OWNER` | `true` | DM the member their transcript. |
 | `ENABLE_MESSAGE_CONTENT` | `false` | Privileged intent; puts message text in transcripts. |
 | `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
+| `GUILD_ID` | — | The one guild this instance serves; others are ignored. |
 | `TICKET_DAILY_LIMIT` | `3` | Tickets per day for a non-admin member. Resets at 00:00 Oman time. |
 | `CLAIM_RESPONSE_TIMEOUT_HOURS` | `12` | Hours the member has to reply after claim before auto-close. |
 | `STREAMER_APPLICATION_CATEGORY_ID` | empty | Enables the Streamer Application section; the category its tickets are created under. |
