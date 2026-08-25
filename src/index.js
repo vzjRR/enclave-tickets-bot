@@ -30,6 +30,8 @@ const {
   updateGuildConfig
 } = require('./storage');
 
+const streamerApplications = require('./streamerApplications');
+
 const BRAND_NAME = 'Enclave Tickets';
 const BRAND_COLOR = 0x90773E;
 const BUILD_ID = 'enclave-tickets-2026-08-21-v4';
@@ -97,6 +99,7 @@ const SECTION_NAME_TRANSLATIONS = {
 
 function translateSectionName(name, lang) {
   if (lang !== 'ar') return name;
+  if (name === streamerApplications.SECTION_NAME) return streamerApplications.translateSectionName(name, lang);
   return SECTION_NAME_TRANSLATIONS[name] || name;
 }
 
@@ -248,6 +251,20 @@ if (ENABLE_MESSAGE_CONTENT) intents.push(GatewayIntentBits.MessageContent);
 if (ENABLE_GUILD_MEMBERS) intents.push(GatewayIntentBits.GuildMembers);
 
 const client = new Client({ intents });
+
+// dmUser, closeAndArchiveTicket and updateSavedPanel are function
+// declarations defined further down this file; referencing them here is
+// safe because declarations are hoisted, and init() itself only stores the
+// references for later use rather than calling them immediately.
+streamerApplications.init({
+  client,
+  dmUser,
+  closeAndArchiveTicket,
+  updateSavedPanel,
+  setGuildConfig,
+  BRAND_COLOR,
+  BRAND_FOOTER
+});
 
 // Serializes read-modify-write sequences per guild. Two members clicking the
 // panel at the same moment would otherwise both read the same ticketCounter
@@ -2528,12 +2545,14 @@ async function provisionGuild(guild, options = {}) {
     ticketCounter: Number(existing?.ticketCounter) || 2000
   });
 
+  const { config: configWithStreamerApp } = streamerApplications.ensureStreamerApplicationSection(config);
+
   const panelMessage = await publishPanelMessage(
-    guild, config, panelChannel, existing?.channelId, existing?.messageId, created
+    guild, configWithStreamerApp, panelChannel, existing?.channelId, existing?.messageId, created
   );
 
   const saved = setGuildConfig(guild.id, stripLegacyConfigKeys({
-    ...config,
+    ...configWithStreamerApp,
     channelId: panelChannel.id,
     messageId: panelMessage?.id || null,
     updatedAt: new Date().toISOString()
@@ -2626,11 +2645,25 @@ client.once(Events.ClientReady, (readyClient) => {
     });
     console.log(`Presence set to: ${BOT_ACTIVITY}`);
   }
+
+  if (streamerApplications.isConfigured()) {
+    for (const guild of readyClient.guilds.cache.values()) {
+      streamerApplications.ensureProvisionedForGuild(guild).catch((error) => {
+        console.error(`Failed to provision the Streamer Application section for ${guild.id}:`, error);
+      });
+    }
+  }
+
   setTimeout(() => runAutomaticMaintenance().catch(console.error), 15_000);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    if (streamerApplications.isStreamerAppInteraction(interaction)) {
+      await streamerApplications.handleInteraction(interaction);
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       if (GUILD_MANAGER_COMMANDS.has(interaction.commandName) && !hasGuildManagerPermission(interaction)) {
         await interaction.reply({
@@ -2934,6 +2967,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content: `You already have a ticket: <#${existingTicket.id}>`,
           flags: MessageFlags.Ephemeral
         });
+        return;
+      }
+
+      // The Streamer Application section skips the free-text "reason" modal
+      // entirely -- the guided wizard it starts inside the ticket replaces it,
+      // and the applicant's Discord identity is read from the interaction
+      // rather than asked for.
+      if (selectedSection.isStreamerApplication) {
+        if (streamerApplications.findActiveApplicationForUser(interaction.guildId, interaction.user.id)) {
+          await interaction.reply({
+            content: 'لديك بالفعل طلب انضمام كستريمر قيد المعالجة.',
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
+        if (!isTicketRateLimitExempt(interaction)) {
+          const { allowed } = consumeTicketRateLimit(interaction.guildId, interaction.user.id, TICKET_DAILY_LIMIT);
+          if (!allowed) {
+            await interaction.reply({
+              content: UI_STRINGS[lang].rateLimited(TICKET_DAILY_LIMIT),
+              flags: MessageFlags.Ephemeral
+            });
+            return;
+          }
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const result = await createTicket({
+          guild: interaction.guild,
+          user: interaction.user,
+          section: selectedSection,
+          reason: 'طلب انضمام كستريمر (Streamer Application)',
+          config
+        });
+
+        if (!result) {
+          await interaction.editReply({ content: 'Ticket setup data is missing. Run /quick-setup to rebuild it.' });
+          return;
+        }
+
+        await streamerApplications.startApplication(result.channel, interaction.user);
+        await interaction.editReply({ content: `Ticket opened: <#${result.channel.id}>` });
         return;
       }
 

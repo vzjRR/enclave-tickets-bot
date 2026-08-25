@@ -1,7 +1,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+// Overridable so an offline test can point at a scratch directory instead of
+// a real deployment's data/ -- unset, this is unchanged from before.
+const DATA_DIR = process.env.TICKETS_DATA_DIR
+  ? path.resolve(process.env.TICKETS_DATA_DIR)
+  : path.join(__dirname, '..', 'data');
 const DB_FILE = path.join(DATA_DIR, 'tickets.json');
 const TMP_FILE = `${DB_FILE}.tmp`;
 const BAK_FILE = `${DB_FILE}.bak`;

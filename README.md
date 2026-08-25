@@ -24,6 +24,10 @@ Support Center                 visible to everyone
 
 ## Features
 
+- **Streamer Application wizard.** A dedicated ticket section that walks the
+  applicant through a 46-question, 7-stage form (in Arabic), then routes the
+  result to a staff review channel with Approve / Reject / Request More
+  Information. See [Streamer Application](#streamer-application) below.
 - **Bilingual panel.** The panel embed and the language picker are shown in
   English and Arabic together; after a member picks one, the category list
   itself is re-rendered in that language.
@@ -252,6 +256,10 @@ code never relies on them alone.
 | `TICKET_REFRESH_INTERVAL_MINUTES` | `30` | Maintenance sweep. Minimum 5. |
 | `TICKET_DAILY_LIMIT` | `3` | Tickets per day for a non-admin member. Resets at 00:00 Oman time. |
 | `CLAIM_RESPONSE_TIMEOUT_HOURS` | `12` | Hours the member has to reply after claim before auto-close. |
+| `STREAMER_APPLICATION_CATEGORY_ID` | empty | Enables the Streamer Application section; the category its tickets are created under. |
+| `STREAMER_ROLE_ID` | empty | Role granted automatically on approval. |
+| `STREAMER_REVIEW_ROLE_ID` | `STAFF_ROLE_ID` | Role that can review/approve/reject applications. |
+| `STREAMER_REVIEW_CHANNEL_ID` | `LOG_CHANNEL_ID` | Channel the staff application card is posted in. |
 
 ### Privileged intents
 
@@ -278,6 +286,7 @@ alongside other bots on the same machine.
 | `npm run deploy` | Register slash commands |
 | `npm run guilds` | List servers the bot is in, with ids |
 | `npm run selftest` | Live test suite |
+| `npm run test:streamer-app` | Offline Streamer Application wizard test (no token needed) |
 | `npm run check` | Syntax-check every source file |
 | `npm run audit` | Dependency vulnerability scan |
 
@@ -299,6 +308,60 @@ refuses to run unless the target guild is named twice:
 ```bash
 SELFTEST_ALLOW_GUILD=<your test guild id> npm run selftest
 ```
+
+## Streamer Application
+
+A guided form for a "become a streamer" application, built on top of the
+ordinary ticket system rather than beside it: picking **🎥 Streamer
+Application** from the panel creates a ticket exactly like any other section
+(same channel naming, same permissions, same Claim/Close controls), except
+the free-text "describe your concern" step is replaced by a 46-question,
+7-stage wizard that runs inside the ticket. It is a self-contained module
+(`src/streamerApplications.js`); index.js only hooks it in, it does not
+modify any other ticket flow.
+
+Set `STREAMER_APPLICATION_CATEGORY_ID` to enable it — with that unset, the
+section is never added to the panel and none of this code path runs. The bot
+adds the section to the panel automatically on every restart (and whenever
+`/quick-setup` runs); no extra command is needed once the env var is set.
+
+**The wizard.** Each of the 46 questions is answered one at a time —
+free-text questions open a modal (grouped up to 5 per modal, under Discord's
+field cap), yes/no questions get two buttons, and the platform question gets
+a multi-select — with the bot always editing the same message rather than
+spamming new ones. Four rule-agreement questions in stages 5 and 7 are
+"gates": answering **لا** re-shows the question instead of advancing, since
+the applicant must agree to proceed.
+
+**Review, edit, submit.** After the last question, the applicant sees a full
+review of every answer with **Submit / Edit / Cancel**. Edit opens a
+stage-then-question picker so a single answer can be corrected without
+retyping everything else, then returns to the review screen.
+
+**Staff review.** Submitting posts a summary card to
+`STREAMER_REVIEW_CHANNEL_ID` (or `LOG_CHANNEL_ID` if unset) with **🟢
+Approve / 🔴 Reject / 🟡 Request More Information**. Every button re-checks
+the clicking member server-side (Administrator, Manage Server, or
+`STREAMER_REVIEW_ROLE_ID`/`STAFF_ROLE_ID`) — visibility of the button is
+never the security boundary. Approve assigns `STREAMER_ROLE_ID`, DMs the
+applicant, and closes the ticket through the same `closeAndArchiveTicket`
+every other ticket uses. Reject asks staff for a reason (modal), DMs it to
+the applicant, and closes the ticket the same way. Request More Information
+posts staff's note in the ticket, DMs the applicant, and — since the
+answers are preserved rather than discarded — re-opens the review screen in
+the ticket so they can edit and resubmit without starting over.
+
+**Storage.** Applications live in the same `data/tickets.json` as everything
+else (via storage.js), keyed by a sequential `ENCLAVE-STR-0001`-style id —
+no new database. State survives a bot restart: an in-progress wizard resumes
+at its current question next time the applicant interacts with it.
+
+**Testing it.** `npm run test:streamer-app` drives the entire wizard, review,
+edit, and every staff decision through the real code with mocked Discord
+objects — no token or live guild needed, and it never touches the real
+`data/` (it points storage at a scratch temp directory via `TICKETS_DATA_DIR`
+and cleans up after itself). It is the fastest way to catch a regression in
+this module; it does not replace clicking through the flow in Discord.
 
 ## Data and backups
 
