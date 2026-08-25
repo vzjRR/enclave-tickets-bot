@@ -158,12 +158,12 @@ const SECTION_NAME_TRANSLATIONS = {
   'Reports': 'بلاغات',
   'Ban Appeal': 'استئناف حظر',
   'Compensation': 'تعويض',
-  'Store': 'المتجر'
+  'Store': 'المتجر',
+  'Streamer Application': 'طلب انضمام كستريمر'
 };
 
 function translateSectionName(name, lang) {
   if (lang !== 'ar') return name;
-  if (name === streamerApplications.SECTION_NAME) return streamerApplications.translateSectionName(name, lang);
   return SECTION_NAME_TRANSLATIONS[name] || name;
 }
 
@@ -336,7 +336,9 @@ streamerApplications.init({
   client,
   dmUser,
   closeAndArchiveTicket,
-  updateSavedPanel,
+  createTicket,
+  isTicketRateLimitExempt,
+  consumeTicketRateLimit,
   setGuildConfig,
   BRAND_COLOR,
   BRAND_FOOTER
@@ -827,7 +829,8 @@ const GUILD_MANAGER_COMMANDS = new Set([
   'quick-setup',
   'ticket-panel',
   'ticket-section-add',
-  'tickets-refresh'
+  'tickets-refresh',
+  'streamer-setup'
 ]);
 
 function hasGuildManagerPermission(interaction) {
@@ -2705,14 +2708,12 @@ async function provisionGuild(guild, options = {}) {
     ticketCounter: Number(existing?.ticketCounter) || 2000
   });
 
-  const { config: configWithStreamerApp } = streamerApplications.ensureStreamerApplicationSection(config);
-
   const panelMessage = await publishPanelMessage(
-    guild, configWithStreamerApp, panelChannel, existing?.channelId, existing?.messageId, created
+    guild, config, panelChannel, existing?.channelId, existing?.messageId, created
   );
 
   const saved = setGuildConfig(guild.id, stripLegacyConfigKeys({
-    ...configWithStreamerApp,
+    ...config,
     channelId: panelChannel.id,
     messageId: panelMessage?.id || null,
     updatedAt: new Date().toISOString()
@@ -2806,24 +2807,9 @@ client.once(Events.ClientReady, (readyClient) => {
     console.log(`Presence set to: ${BOT_ACTIVITY}`);
   }
 
-  // Sequential on purpose: provisioning the Streamer Application section
-  // mutates the saved config, and resyncSavedPanels() reads that config fresh
-  // -- running them concurrently would race and could resync the panel one
-  // edit too early, before the new section is in it.
-  (async () => {
-    if (streamerApplications.isConfigured()) {
-      for (const guild of readyClient.guilds.cache.values()) {
-        if (!isAllowedGuild(guild.id)) continue;
-        await streamerApplications.ensureProvisionedForGuild(guild).catch((error) => {
-          console.error(`Failed to provision the Streamer Application section for ${guild.id}:`, error);
-        });
-      }
-    }
-
-    await resyncSavedPanels().catch((error) => {
-      console.error('Failed to resync saved ticket panels:', error);
-    });
-  })();
+  resyncSavedPanels().catch((error) => {
+    console.error('Failed to resync saved ticket panels:', error);
+  });
 
   setTimeout(() => runAutomaticMaintenance().catch(console.error), 15_000);
 });
@@ -2899,6 +2885,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
         pruneSetupSessions();
         await interaction.editReply({
           content: `Tickets refreshed. Total: ${result.total}, updated: ${result.updated}, failed: ${result.failed}.`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'streamer-setup') {
+        if (!streamerApplications.isConfigured()) {
+          await interaction.reply({
+            content: 'STREAMER_APPLICATION_CATEGORY_ID is not set, so this feature is disabled.',
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+        if (!interaction.channel?.isTextBased()) {
+          await interaction.reply({ content: 'Use this command in a text channel.', flags: MessageFlags.Ephemeral });
+          return;
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const result = await streamerApplications.publishPanel(interaction.guild, interaction.channel);
+        await interaction.editReply({
+          content: result.reused
+            ? `Streamer Application panel refreshed in <#${result.channel.id}>.`
+            : `Streamer Application panel published in <#${result.channel.id}>.`
         });
         return;
       }
@@ -3143,53 +3151,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content: t(lang).alreadyOpen(existingTicket.id),
           flags: MessageFlags.Ephemeral
         });
-        return;
-      }
-
-      // The Streamer Application section skips the free-text "reason" modal
-      // entirely -- the guided wizard it starts inside the ticket replaces it,
-      // and the applicant's Discord identity is read from the interaction
-      // rather than asked for.
-      if (selectedSection.isStreamerApplication) {
-        if (streamerApplications.findActiveApplicationForUser(interaction.guildId, interaction.user.id)) {
-          await interaction.reply({
-            content: 'لديك بالفعل طلب انضمام كستريمر قيد المعالجة.',
-            flags: MessageFlags.Ephemeral
-          });
-          return;
-        }
-
-        if (!isTicketRateLimitExempt(interaction)) {
-          const { allowed } = consumeTicketRateLimit(interaction.guildId, interaction.user.id, TICKET_DAILY_LIMIT);
-          if (!allowed) {
-            await interaction.reply({
-              content: UI_STRINGS[lang].rateLimited(TICKET_DAILY_LIMIT),
-              flags: MessageFlags.Ephemeral
-            });
-            return;
-          }
-        }
-
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const result = await createTicket({
-          guild: interaction.guild,
-          user: interaction.user,
-          section: selectedSection,
-          reason: 'طلب انضمام كستريمر (Streamer Application)',
-          config,
-          // The wizard's 46 questions are Arabic-only by spec, so the
-          // surrounding ticket chrome (embed, confirmation DM) matches
-          // rather than mixing English chrome around an Arabic form.
-          lang: 'ar'
-        });
-
-        if (!result) {
-          await interaction.editReply({ content: 'Ticket setup data is missing. Run /quick-setup to rebuild it.' });
-          return;
-        }
-
-        await streamerApplications.startApplication(result.channel, interaction.user);
-        await interaction.editReply({ content: `Ticket opened: <#${result.channel.id}>` });
         return;
       }
 

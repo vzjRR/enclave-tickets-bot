@@ -68,6 +68,11 @@ const commands = [
     .setContexts(guildOnly)
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
+    .setName('streamer-setup')
+    .setDescription('Publish (or refresh) the standalone Streamer Application panel in this channel')
+    .setContexts(guildOnly)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
     .setName('ticket-admin')
     .setDescription('Open the private admin panel for the current ticket')
     .setContexts(guildOnly)

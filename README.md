@@ -24,10 +24,11 @@ Support Center                 visible to everyone
 
 ## Features
 
-- **Streamer Application wizard.** A dedicated ticket section that walks the
-  applicant through a 46-question, 7-stage form (in Arabic), then routes the
-  result to a staff review channel with Approve / Reject / Request More
-  Information. See [Streamer Application](#streamer-application) below.
+- **Streamer Application wizard.** A standalone panel, separate from the
+  ordinary ticket system, that walks the applicant through a 46-question,
+  7-stage form (in Arabic), then routes the result to a staff review channel
+  with Approve / Reject / Request More Information. See
+  [Streamer Application](#streamer-application) below.
 - **Bilingual, end to end.** The panel embed and the language picker are shown
   in English and Arabic together. Once a member picks one, *everything the bot
   sends that member* is in it: the category list, the reason modal, every
@@ -339,19 +340,24 @@ SELFTEST_ALLOW_GUILD=<your test guild id> npm run selftest
 
 ## Streamer Application
 
-A guided form for a "become a streamer" application, built on top of the
-ordinary ticket system rather than beside it: picking **🎥 Streamer
-Application** from the panel creates a ticket exactly like any other section
-(same channel naming, same permissions, same Claim/Close controls), except
-the free-text "describe your concern" step is replaced by a 46-question,
-7-stage wizard that runs inside the ticket. It is a self-contained module
-(`src/streamerApplications.js`); index.js only hooks it in, it does not
-modify any other ticket flow.
+A guided form for a "become a streamer" application, kept entirely separate
+from the ordinary ticket panel and `/quick-setup` -- deliberately, so it can
+run on a server that already has its own ticket system in place without
+touching it. It has its own panel, its own setup command, and its own
+category/roles; the only things it borrows from the ordinary ticket system
+are `createTicket` (so the application still gets a real private channel
+with Claim/Close controls) and `closeAndArchiveTicket` (so approving or
+rejecting still archives a transcript the same way any other ticket close
+does). It is a self-contained module (`src/streamerApplications.js`);
+index.js only hooks it in and never modifies `config.sections`, the panel
+menu, or any other ticket flow for it.
 
-Set `STREAMER_APPLICATION_CATEGORY_ID` to enable it — with that unset, the
-section is never added to the panel and none of this code path runs. The bot
-adds the section to the panel automatically on every restart (and whenever
-`/quick-setup` runs); no extra command is needed once the env var is set.
+Set `STREAMER_APPLICATION_CATEGORY_ID` to enable it — with that unset,
+`/streamer-setup` refuses to run and none of this code path activates. Once
+set, run **`/streamer-setup`** in whichever channel should host the panel;
+it posts one embed with a single **🎥 تقديم طلب** button, and running the
+command again edits that same message in place rather than posting a
+duplicate (wherever it currently lives, even a different channel).
 
 **The wizard.** Each of the 46 questions is answered one at a time —
 free-text questions open a modal (grouped up to 5 per modal, under Discord's

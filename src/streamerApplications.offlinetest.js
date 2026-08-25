@@ -36,12 +36,23 @@ setGuildConfig(GUILD_ID, {
 let dmCount = 0;
 let closedTicket = null;
 const roleAdds = [];
+let createdTicketCount = 0;
 
 sapp.init({
   client: { user: { id: 'BOTID' } },
   dmUser: async () => { dmCount += 1; return true; },
   closeAndArchiveTicket: async (channel, closedById) => { closedTicket = { channel: channel.id, closedById }; return { ok: true }; },
-  updateSavedPanel: async () => ({ ok: true }),
+  // Mimics the real createTicket's contract (creates a channel, returns
+  // { channel }) without touching Discord -- registered so guild.channels.fetch
+  // can find it, matching how staff actions later look the ticket back up.
+  createTicket: async ({ guild: g, section }) => {
+    createdTicketCount += 1;
+    const id = `chan-created-${createdTicketCount}`;
+    const channel = registerChannel({ id, guild: g, send: makeMessageStore().send });
+    return { channel, ticketNumber: 2000 + createdTicketCount, notified: true, section };
+  },
+  isTicketRateLimitExempt: () => true,
+  consumeTicketRateLimit: () => ({ allowed: true, remaining: 2 }),
   setGuildConfig,
   BRAND_COLOR: 0x123456,
   BRAND_FOOTER: 'Test | Footer'
@@ -383,13 +394,53 @@ async function main() {
     check('active application detected for duplicate-prevention check', Boolean(sapp.findActiveApplicationForUser(GUILD_ID, 'user-dup')));
   }
 
-  // --- Section provisioning is idempotent and no-ops when unconfigured ----
+  // --- The dedicated panel: /streamer-setup publishes it, separately from
+  // the ordinary ticket panel/config.sections, and its Apply button creates
+  // a ticket + starts the wizard the same way the old in-panel entry did ---
   {
-    const withoutFeature = { ...sapp.ensureStreamerApplicationSection({ sections: [] }).config };
-    const first = sapp.ensureStreamerApplicationSection({ sections: [] });
-    check('section added when configured', first.changed === true);
-    const second = sapp.ensureStreamerApplicationSection(first.config);
-    check('section provisioning is idempotent', second.changed === false);
+    const panelStore = makeMessageStore();
+    const panelChannel = registerChannel({
+      id: 'chan-panel', guild, isTextBased: () => true,
+      send: panelStore.send, messages: { fetch: panelStore.fetch }
+    });
+
+    const published = await sapp.publishPanel(guild, panelChannel);
+    check('publishPanel posts a fresh panel', published.ok === true && published.reused === false);
+
+    const configAfterPublish = require('./storage').getGuildConfig(GUILD_ID);
+    check(
+      'panel location is stored under its own key, not config.sections',
+      configAfterPublish.streamerApplicationPanel?.channelId === 'chan-panel' &&
+        !(configAfterPublish.sections || []).some((s) => s.name === 'Streamer Application')
+    );
+
+    const republished = await sapp.publishPanel(guild, panelChannel);
+    check('publishPanel edits the existing message in place on a second call', republished.reused === true);
+
+    let applyReply = null;
+    const applyInteraction = {
+      customId: 'sapp:panel:apply',
+      guildId: GUILD_ID, guild, user: { id: 'user-apply' },
+      deferred: false, replied: false,
+      deferReply: async () => { applyInteraction.deferred = true; },
+      editReply: async (payload) => { applyReply = payload; }
+    };
+    check('apply button handled', (await sapp.handleInteraction(applyInteraction)) === true);
+    check('apply button created a ticket and started the wizard', Boolean(applyReply?.content?.includes('تذكرتك')));
+    check(
+      'the created application is not tied to any config.sections entry',
+      Boolean(sapp.findActiveApplicationForUser(GUILD_ID, 'user-apply'))
+    );
+
+    let dupApplyReply = null;
+    const dupApplyInteraction = {
+      customId: 'sapp:panel:apply',
+      guildId: GUILD_ID, guild, user: { id: 'user-apply' },
+      deferred: false, replied: false,
+      reply: async (payload) => { dupApplyReply = payload; }
+    };
+    await sapp.handleInteraction(dupApplyInteraction);
+    check('a second Apply click while one is active is blocked', Boolean(dupApplyReply));
   }
 
   console.log(`\n${assertions} checks, ${failures} failed`);

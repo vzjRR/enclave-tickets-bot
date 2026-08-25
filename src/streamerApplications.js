@@ -1,14 +1,16 @@
 // ---------------------------------------------------------------------------
 // Streamer Application wizard
 //
-// A guided, multi-stage form that runs inside an ordinary ticket channel
-// created by the existing ticket system (see index.js's createTicket / the
-// "Streamer Application" section). This module owns none of the channel
-// lifecycle -- it only drives what happens inside the channel: the question
-// wizard, the review screen, and the staff approve/reject/needs-info
-// workflow. Dependencies (client, storage, and a handful of index.js
-// helpers) are injected via init() rather than required directly, so this
-// file never creates a circular require with index.js.
+// A guided, multi-stage form, entirely separate from the ordinary ticket
+// system: its own panel, its own setup command (/streamer-setup), its own
+// category and roles. It happens to reuse createTicket() to make the ticket
+// channel (private, Claim/Close controls, archive-on-close all included for
+// free) and closeAndArchiveTicket() to close it, but it is never a member of
+// the ordinary panel's config.sections, is never touched by /quick-setup,
+// and does not appear in the ordinary ticket category list. Dependencies
+// (client, storage, and a handful of index.js helpers) are injected via
+// init() rather than required directly, so this file never creates a
+// circular require with index.js.
 // ---------------------------------------------------------------------------
 
 const {
@@ -27,15 +29,17 @@ const {
 
 const { getGuildConfig, updateGuildConfig } = require('./storage');
 
-const SECTION_ID = 'streamer-application';
-const SECTION_NAME = 'Streamer Application';
-const SECTION_NAME_AR = 'طلب انضمام كستريمر';
-const SECTION_EMOJI = '🎥';
+const PANEL_TITLE = '🎥 التقديم للانضمام كستريمر - Streamer Application';
+const PANEL_DESCRIPTION =
+  'اضغط الزر أدناه لبدء طلب الانضمام كستريمر في ENCLAVE RP. سيُفتح لك تذكرة خاصة ' +
+  'يرشدك فيها البوت عبر عدة مراحل من الأسئلة.';
+const APPLY_BUTTON_LABEL = '🎥 تقديم طلب';
 
 const STREAMER_APPLICATION_CATEGORY_ID = (process.env.STREAMER_APPLICATION_CATEGORY_ID || '').trim();
 const STREAMER_ROLE_ID = (process.env.STREAMER_ROLE_ID || '').trim();
 const STREAMER_REVIEW_ROLE_ID = (process.env.STREAMER_REVIEW_ROLE_ID || '').trim();
 const STREAMER_REVIEW_CHANNEL_ID = (process.env.STREAMER_REVIEW_CHANNEL_ID || '').trim();
+const TICKET_DAILY_LIMIT = Math.max(1, Number.parseInt(process.env.TICKET_DAILY_LIMIT || '3', 10) || 3);
 
 const APP_ID_PREFIX = 'ENCLAVE-STR-';
 
@@ -315,77 +319,59 @@ function logError(message, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Section provisioning -- adopts the given category/roles as just another
-// ticket section, so channel creation, permissions, staff mention, claim and
-// close all go through the existing, unmodified ticket pipeline.
+// The dedicated panel -- entirely separate from the ordinary ticket panel.
+// Stored under its own config key (streamerApplicationPanel), never inside
+// config.sections, so /quick-setup and the ordinary category picker never
+// see or touch it.
 // ---------------------------------------------------------------------------
 
 function isConfigured() {
   return Boolean(STREAMER_APPLICATION_CATEGORY_ID);
 }
 
-function ensureStreamerApplicationSection(config) {
-  if (!isConfigured()) return { config, changed: false };
-
-  const sections = config.sections || [];
-  const existing = sections.find((s) => s.id === SECTION_ID);
-  const staffRoleId = (process.env.STAFF_ROLE_ID || '').trim();
-  const roleIds = [...new Set([STREAMER_REVIEW_ROLE_ID, staffRoleId].filter(Boolean))];
-
-  const desired = {
-    id: SECTION_ID,
-    name: SECTION_NAME,
-    emoji: SECTION_EMOJI,
-    categoryId: STREAMER_APPLICATION_CATEGORY_ID,
-    roleIds: roleIds.length ? roleIds : (existing?.roleIds || []),
-    isStreamerApplication: true
-  };
-
-  if (
-    existing &&
-    existing.categoryId === desired.categoryId &&
-    existing.isStreamerApplication &&
-    JSON.stringify(existing.roleIds) === JSON.stringify(desired.roleIds)
-  ) {
-    return { config, changed: false };
-  }
-
-  const nextSections = existing
-    ? sections.map((s) => (s.id === SECTION_ID ? { ...s, ...desired } : s))
-    : [...sections, desired];
-
-  return { config: { ...config, sections: nextSections }, changed: true };
+function buildPanelEmbed() {
+  return brandEmbed().setTitle(PANEL_TITLE).setDescription(PANEL_DESCRIPTION);
 }
 
-// Called once per guild at bot startup (see index.js ClientReady) so an
-// existing deployment picks up the new category without a manual
-// /quick-setup re-run. Also called from provisionGuild itself so a fresh
-// /quick-setup gets it immediately.
-async function ensureProvisionedForGuild(guild) {
-  if (!isConfigured()) return;
+function buildPanelComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('sapp:panel:apply').setLabel(APPLY_BUTTON_LABEL).setStyle(ButtonStyle.Primary)
+    )
+  ];
+}
 
-  const config = getGuildConfig(guild.id);
-  if (!config?.sections) return;
+// Posts a fresh panel in `channel`, or edits the previously saved one in
+// place if this guild already has one (anywhere, not just in this channel --
+// matching /quick-setup's own "one panel, edited in place" behaviour).
+async function publishPanel(guild, channel) {
+  const config = getGuildConfig(guild.id) || {};
+  const saved = config.streamerApplicationPanel;
+  const payload = { embeds: [buildPanelEmbed()], components: buildPanelComponents() };
 
-  const { config: nextConfig, changed } = ensureStreamerApplicationSection(config);
-  if (!changed) return;
+  if (saved?.channelId && saved?.messageId) {
+    const existingChannel = saved.channelId === channel.id
+      ? channel
+      : await guild.channels.fetch(saved.channelId).catch(() => null);
+    const existingMessage = existingChannel?.isTextBased()
+      ? await existingChannel.messages.fetch(saved.messageId).catch(() => null)
+      : null;
 
-  deps.setGuildConfig(guild.id, nextConfig);
-  log(`Streamer Application section provisioned for guild ${guild.id}`);
-
-  if (nextConfig.channelId && nextConfig.messageId) {
-    const result = await deps.updateSavedPanel(guild, nextConfig).catch((error) => {
-      logError(`Failed to refresh the panel after adding the Streamer Application section in ${guild.id}:`, error);
-      return { ok: false };
-    });
-    if (!result.ok) {
-      log(`Panel refresh after provisioning skipped or failed for ${guild.id}: ${result.reason || 'unknown'}`);
+    if (existingMessage) {
+      await existingMessage.edit(payload);
+      if (existingChannel.id !== channel.id) {
+        return { ok: true, channel: existingChannel, movedFrom: null, reused: true };
+      }
+      return { ok: true, channel: existingChannel, reused: true };
     }
   }
-}
 
-function translateSectionName(name, lang) {
-  return name === SECTION_NAME && lang === 'ar' ? SECTION_NAME_AR : name;
+  const message = await channel.send(payload);
+  deps.setGuildConfig(guild.id, {
+    ...config,
+    streamerApplicationPanel: { channelId: channel.id, messageId: message.id }
+  });
+  return { ok: true, channel, reused: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -501,9 +487,64 @@ async function renderStep(interactionOrMessage, application, { asUpdate = true }
 }
 
 // ---------------------------------------------------------------------------
-// Applicant-facing entry point -- called by index.js right after createTicket
-// makes the channel for the Streamer Application section.
+// Applicant-facing entry point: the dedicated panel's Apply button. Creates
+// the ticket itself (via createTicket -- the only borrowed piece of the
+// ordinary ticket system) with a section object built entirely from env
+// vars, never touching config.sections.
 // ---------------------------------------------------------------------------
+
+const STREAMER_SECTION = {
+  name: 'Streamer Application',
+  emoji: '🎥',
+  categoryId: STREAMER_APPLICATION_CATEGORY_ID,
+  get roleIds() {
+    const staffRoleId = (process.env.STAFF_ROLE_ID || '').trim();
+    return [...new Set([STREAMER_REVIEW_ROLE_ID, staffRoleId].filter(Boolean))];
+  }
+};
+
+async function handlePanelApply(interaction) {
+  if (findActiveApplicationForUser(interaction.guildId, interaction.user.id)) {
+    await ephemeralError(interaction, 'لديك بالفعل طلب انضمام كستريمر قيد المعالجة.');
+    return true;
+  }
+
+  if (!deps.isTicketRateLimitExempt(interaction)) {
+    const { allowed } = deps.consumeTicketRateLimit(interaction.guildId, interaction.user.id, TICKET_DAILY_LIMIT);
+    if (!allowed) {
+      await ephemeralError(
+        interaction,
+        `لقد وصلت إلى الحد الأقصى اليومي وهو ${TICKET_DAILY_LIMIT} تذاكر. حاول مرة أخرى بعد الساعة ٠٠:٠٠ بتوقيت عمان.`
+      );
+      return true;
+    }
+  }
+
+  const config = getGuildConfig(interaction.guildId);
+  if (!config) {
+    await ephemeralError(interaction, 'إعداد التذاكر غير موجود بعد. يرجى إبلاغ الإدارة لتشغيل /quick-setup أولاً.');
+    return true;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const result = await deps.createTicket({
+    guild: interaction.guild,
+    user: interaction.user,
+    section: STREAMER_SECTION,
+    reason: 'طلب انضمام كستريمر (Streamer Application)',
+    config,
+    lang: 'ar'
+  });
+
+  if (!result) {
+    await interaction.editReply({ content: 'تعذّر إنشاء التذكرة. يرجى إبلاغ الإدارة.' });
+    return true;
+  }
+
+  await startApplication(result.channel, interaction.user);
+  await interaction.editReply({ content: `تم فتح تذكرتك: <#${result.channel.id}>` });
+  return true;
+}
 
 async function startApplication(channel, user, member = null) {
   const resolvedMember = member || await channel.guild.members.fetch(user.id).catch(() => null);
@@ -621,6 +662,7 @@ async function handleInteraction(interaction) {
   const kind = parts[1];
 
   try {
+    if (kind === 'panel') return await handlePanelApply(interaction, parts);
     if (kind === 'open') return await handleOpenModal(interaction, parts);
     if (kind === 'modalsubmit') return await handleModalSubmit(interaction, parts);
     if (kind === 'yn') return await handleYesNo(interaction, parts);
@@ -1260,12 +1302,8 @@ async function handleStaffInfoSubmit(interaction, parts) {
 
 module.exports = {
   init,
-  SECTION_ID,
-  SECTION_NAME,
   isConfigured,
-  translateSectionName,
-  ensureStreamerApplicationSection,
-  ensureProvisionedForGuild,
+  publishPanel,
   startApplication,
   handleInteraction,
   isStreamerAppInteraction,
