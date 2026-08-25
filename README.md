@@ -287,7 +287,7 @@ code never relies on them alone.
 | `CLAIM_RESPONSE_TIMEOUT_HOURS` | `12` | Hours the member has to reply after claim before auto-close. |
 | `STREAMER_APPLICATION_CATEGORY_ID` | empty | Enables the Streamer Application section; the category its tickets are created under. |
 | `STREAMER_ROLE_ID` | empty | Role granted automatically on approval. |
-| `STREAMER_REVIEW_ROLE_ID` | `STAFF_ROLE_ID` | Role that can review/approve/reject applications. |
+| `STREAMER_REVIEW_ROLE_ID` | `STAFF_ROLE_ID` | Role(s) that can review/approve/reject applications. Comma-separated for more than one. |
 | `STREAMER_REVIEW_CHANNEL_ID` | `LOG_CHANNEL_ID` | Channel the staff application card is posted in. |
 
 ### Privileged intents

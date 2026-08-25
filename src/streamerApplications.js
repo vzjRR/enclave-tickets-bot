@@ -37,7 +37,12 @@ const APPLY_BUTTON_LABEL = '🎥 تقديم طلب';
 
 const STREAMER_APPLICATION_CATEGORY_ID = (process.env.STREAMER_APPLICATION_CATEGORY_ID || '').trim();
 const STREAMER_ROLE_ID = (process.env.STREAMER_ROLE_ID || '').trim();
-const STREAMER_REVIEW_ROLE_ID = (process.env.STREAMER_REVIEW_ROLE_ID || '').trim();
+// Comma-separated so more than one team can review applications (e.g. a
+// support lead role alongside a dedicated streamer-review role).
+const STREAMER_REVIEW_ROLE_IDS = (process.env.STREAMER_REVIEW_ROLE_ID || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
 const STREAMER_REVIEW_CHANNEL_ID = (process.env.STREAMER_REVIEW_CHANNEL_ID || '').trim();
 const TICKET_DAILY_LIMIT = Math.max(1, Number.parseInt(process.env.TICKET_DAILY_LIMIT || '3', 10) || 3);
 
@@ -499,7 +504,7 @@ const STREAMER_SECTION = {
   categoryId: STREAMER_APPLICATION_CATEGORY_ID,
   get roleIds() {
     const staffRoleId = (process.env.STAFF_ROLE_ID || '').trim();
-    return [...new Set([STREAMER_REVIEW_ROLE_ID, staffRoleId].filter(Boolean))];
+    return [...new Set([...STREAMER_REVIEW_ROLE_IDS, staffRoleId].filter(Boolean))];
   }
 };
 
@@ -648,11 +653,13 @@ async function isReviewStaff(interaction) {
     return true;
   }
 
-  const reviewRoleId = STREAMER_REVIEW_ROLE_ID || (process.env.STAFF_ROLE_ID || '').trim();
-  if (!reviewRoleId) return false;
+  const reviewRoleIds = STREAMER_REVIEW_ROLE_IDS.length
+    ? STREAMER_REVIEW_ROLE_IDS
+    : [(process.env.STAFF_ROLE_ID || '').trim()].filter(Boolean);
+  if (!reviewRoleIds.length) return false;
 
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => interaction.member);
-  return Boolean(member?.roles?.cache?.has(reviewRoleId));
+  return reviewRoleIds.some((roleId) => member?.roles?.cache?.has(roleId));
 }
 
 async function handleInteraction(interaction) {
