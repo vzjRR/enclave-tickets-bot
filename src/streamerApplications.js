@@ -381,15 +381,13 @@ function resolvePanelImageAttachment(filename) {
 }
 
 function buildPanelEmbed(imageAttachment = null) {
-  const embed = brandEmbed().setTitle(PANEL_TITLE);
-  // A banner image already carries the message as artwork, so it replaces
-  // the written description rather than sitting alongside it.
+  // A banner image already carries everything -- title, description,
+  // branding -- baked in as artwork, so when one is set the embed shows
+  // nothing else: just the image, with the Apply button below it.
   if (imageAttachment) {
-    embed.setImage(`attachment://${imageAttachment.name}`);
-  } else {
-    embed.setDescription(PANEL_DESCRIPTION);
+    return new EmbedBuilder().setColor(deps.BRAND_COLOR).setImage(`attachment://${imageAttachment.name}`);
   }
-  return embed;
+  return brandEmbed().setTitle(PANEL_TITLE).setDescription(PANEL_DESCRIPTION);
 }
 
 function buildPanelComponents() {

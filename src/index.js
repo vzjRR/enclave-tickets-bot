@@ -267,6 +267,12 @@ const STAFF_DM_LIMIT = Math.max(
   Number.parseInt(process.env.STAFF_DM_LIMIT || '25', 10) || 25
 );
 
+// A channel with zero tolerance for any message at all: the first two get the
+// author kicked, the third gets them banned. Unset by default -- with no
+// channel id configured, none of this code path activates.
+const ZERO_TOLERANCE_CHANNEL_ID = (process.env.ZERO_TOLERANCE_CHANNEL_ID || '').trim();
+const ZERO_TOLERANCE_BAN_AFTER = 3;
+
 // Whether the member who opened a ticket receives their own transcript when
 // it closes. The ticket log is staff-only and Discord cannot show a member
 // just their own entry in it, so this is how they get their record.
@@ -524,6 +530,88 @@ client.on(Events.MessageCreate, (message) => {
   ticketOwnerActivity.set(message.channel.id, Date.now());
 });
 
+// Zero-tolerance channel: no permission check, no warning -- anyone who
+// posts anything here (text, an attachment, a sticker, an emoji-only
+// message) is removed immediately. Applies regardless of role; Discord
+// itself still refuses to let any bot kick or ban the server owner, or
+// anyone whose top role sits at or above the bot's own, no matter what
+// permissions the bot holds.
+function recordZeroToleranceViolation(guildId, userId) {
+  let count = 0;
+  updateGuildConfig(guildId, (config) => {
+    if (!config) return null;
+    const violations = { ...(config.zeroToleranceViolations || {}) };
+    count = (violations[userId] || 0) + 1;
+    violations[userId] = count;
+    return { ...config, zeroToleranceViolations: violations };
+  });
+  return count;
+}
+
+async function enforceZeroToleranceChannel(message) {
+  const guild = message.guild;
+  const userId = message.author.id;
+
+  await message.delete().catch(() => {});
+
+  const violationCount = recordZeroToleranceViolation(guild.id, userId);
+  const willBan = violationCount >= ZERO_TOLERANCE_BAN_AFTER;
+
+  const dmEmbed = willBan
+    ? new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setTitle('You have been banned')
+        .setDescription(
+          `You have been permanently banned from **${guild.name}** for repeatedly breaking the rules ` +
+          `in <#${ZERO_TOLERANCE_CHANNEL_ID}> (violation ${violationCount}/${ZERO_TOLERANCE_BAN_AFTER}).\n\n` +
+          'تم حظرك نهائياً من السيرفر بسبب تكرار مخالفة قوانين هذه القناة ' +
+          `(المخالفة ${violationCount}/${ZERO_TOLERANCE_BAN_AFTER}).`
+        )
+    : new EmbedBuilder()
+        .setColor(0xf39c12)
+        .setTitle('You have been kicked')
+        .setDescription(
+          `You have been kicked from **${guild.name}** for breaking the rules in <#${ZERO_TOLERANCE_CHANNEL_ID}>. ` +
+          `You may rejoin, but reaching ${ZERO_TOLERANCE_BAN_AFTER} violations will get you permanently banned ` +
+          `(violation ${violationCount}/${ZERO_TOLERANCE_BAN_AFTER}).\n\n` +
+          `تم طردك من السيرفر بسبب مخالفة قوانين هذه القناة. يمكنك الانضمام مجدداً، لكن الوصول إلى ` +
+          `${ZERO_TOLERANCE_BAN_AFTER} مخالفات سيؤدي إلى حظرك نهائياً (المخالفة ${violationCount}/${ZERO_TOLERANCE_BAN_AFTER}).`
+        );
+
+  // Sent before removing them: once they are gone the bot may no longer
+  // share any server with them, and the DM can silently fail to even open.
+  await dmUser(userId, { embeds: [dmEmbed] }, willBan ? 'zero-tolerance ban notice' : 'zero-tolerance kick notice');
+
+  const reason = `Zero-tolerance channel violation ${violationCount}/${ZERO_TOLERANCE_BAN_AFTER}`;
+
+  try {
+    if (willBan) {
+      await guild.members.ban(userId, { reason });
+    } else {
+      const member = message.member || await guild.members.fetch(userId).catch(() => null);
+      if (!member) {
+        console.warn(`Zero-tolerance: ${userId} left before they could be kicked.`);
+        return;
+      }
+      await member.kick(reason);
+    }
+    console.log(`Zero-tolerance: ${willBan ? 'banned' : 'kicked'} ${userId} (violation ${violationCount}).`);
+  } catch (error) {
+    console.error(`Zero-tolerance action failed for ${userId}:`, error?.message || error);
+  }
+}
+
+client.on(Events.MessageCreate, (message) => {
+  if (!ZERO_TOLERANCE_CHANNEL_ID) return;
+  if (!message.guild || message.author?.bot) return;
+  if (!isAllowedGuild(message.guild.id)) return;
+  if (message.channel.id !== ZERO_TOLERANCE_CHANNEL_ID) return;
+
+  enforceZeroToleranceChannel(message).catch((error) => {
+    console.error(`Zero-tolerance enforcement failed for message ${message.id}:`, error?.message || error);
+  });
+});
+
 function isHttpUrl(value) {
   if (!value) return false;
 
@@ -637,32 +725,31 @@ function buildPanelEmbed(config, imageAttachment = null) {
   const custom = config || {};
   const hasImage = Boolean(imageAttachment) || isHttpUrl(custom.imageUrl);
 
-  const embed = new EmbedBuilder()
-    .setColor(custom.color || BRAND_COLOR)
+  const embed = new EmbedBuilder().setColor(custom.color || BRAND_COLOR);
+
+  // A banner image already carries everything -- title, description,
+  // branding -- baked in as artwork, so when one is set the embed shows
+  // nothing else: just the image, with the panel's own menu below it.
+  if (hasImage) {
+    if (imageAttachment) {
+      embed.setImage(`attachment://${imageAttachment.name}`);
+    } else {
+      embed.setImage(custom.imageUrl);
+    }
+    return embed;
+  }
+
+  embed
     .setTitle(custom.title || PANEL_TITLE)
+    .setDescription(custom.description || PANEL_DESCRIPTION)
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
 
-  // A banner image already carries the message -- title, description,
-  // branding, even a small version of this same logo -- baked in as artwork,
-  // so it replaces the written description and the thumbnail both, rather
-  // than sitting alongside a second, redundant copy of the logo.
-  if (!hasImage) {
-    embed.setDescription(custom.description || PANEL_DESCRIPTION);
-
-    // The bot's own avatar is a Discord-hosted image, so the panel gets
-    // artwork without depending on some external host staying up.
-    const icon = client.user?.displayAvatarURL({ size: 256 });
-    if (icon) embed.setThumbnail(icon);
-  }
-
+  // The bot's own avatar is a Discord-hosted image, so the panel gets
+  // artwork without depending on some external host staying up.
+  const icon = client.user?.displayAvatarURL({ size: 256 });
+  if (icon) embed.setThumbnail(icon);
   if (isHttpUrl(custom.thumbnailUrl)) embed.setThumbnail(custom.thumbnailUrl);
-
-  if (imageAttachment) {
-    embed.setImage(`attachment://${imageAttachment.name}`);
-  } else if (isHttpUrl(custom.imageUrl)) {
-    embed.setImage(custom.imageUrl);
-  }
 
   return embed;
 }
