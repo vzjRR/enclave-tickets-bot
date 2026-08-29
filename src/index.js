@@ -644,14 +644,17 @@ function buildPanelEmbed(config, imageAttachment = null) {
     .setTimestamp();
 
   // A banner image already carries the message -- title, description,
-  // branding -- baked in as artwork, so it replaces the written description
-  // rather than sitting above or below it.
-  if (!hasImage) embed.setDescription(custom.description || PANEL_DESCRIPTION);
+  // branding, even a small version of this same logo -- baked in as artwork,
+  // so it replaces the written description and the thumbnail both, rather
+  // than sitting alongside a second, redundant copy of the logo.
+  if (!hasImage) {
+    embed.setDescription(custom.description || PANEL_DESCRIPTION);
 
-  // The bot's own avatar is a Discord-hosted image, so the panel gets artwork
-  // without depending on some external host staying up.
-  const icon = client.user?.displayAvatarURL({ size: 256 });
-  if (icon) embed.setThumbnail(icon);
+    // The bot's own avatar is a Discord-hosted image, so the panel gets
+    // artwork without depending on some external host staying up.
+    const icon = client.user?.displayAvatarURL({ size: 256 });
+    if (icon) embed.setThumbnail(icon);
+  }
 
   if (isHttpUrl(custom.thumbnailUrl)) embed.setThumbnail(custom.thumbnailUrl);
 
