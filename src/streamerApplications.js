@@ -320,7 +320,11 @@ function log(message, extra) {
 }
 
 function logError(message, error) {
-  console.error(`[streamer-app] ${message}`, error?.message || error);
+  // DiscordAPIError carries a numeric `code` (e.g. 50013 Missing Permissions)
+  // distinct from the HTTP status, plus a full stack -- log both, since a
+  // bare `error.message` gives no clue which Discord API call actually
+  // failed when several run in sequence (channel create, then send, etc).
+  console.error(`[streamer-app] ${message}`, error?.code !== undefined ? `[code ${error.code}]` : '', error?.stack || error);
 }
 
 // ---------------------------------------------------------------------------
