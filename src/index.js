@@ -30,6 +30,8 @@ const {
   updateGuildConfig
 } = require('./storage');
 
+const streamerApplications = require('./streamerApplications');
+
 const BRAND_NAME = 'Enclave Tickets';
 const BRAND_COLOR = 0x90773E;
 const BUILD_ID = 'enclave-tickets-2026-08-21-v4';
@@ -156,7 +158,8 @@ const SECTION_NAME_TRANSLATIONS = {
   'Reports': 'بلاغات',
   'Ban Appeal': 'استئناف حظر',
   'Compensation': 'تعويض',
-  'Store': 'المتجر'
+  'Store': 'المتجر',
+  'Streamer Application': 'طلب انضمام كستريمر'
 };
 
 function translateSectionName(name, lang) {
@@ -324,6 +327,22 @@ if (ENABLE_MESSAGE_CONTENT) intents.push(GatewayIntentBits.MessageContent);
 if (ENABLE_GUILD_MEMBERS) intents.push(GatewayIntentBits.GuildMembers);
 
 const client = new Client({ intents });
+
+// dmUser, closeAndArchiveTicket and updateSavedPanel are function
+// declarations defined further down this file; referencing them here is
+// safe because declarations are hoisted, and init() itself only stores the
+// references for later use rather than calling them immediately.
+streamerApplications.init({
+  client,
+  dmUser,
+  closeAndArchiveTicket,
+  createTicket,
+  isTicketRateLimitExempt,
+  consumeTicketRateLimit,
+  setGuildConfig,
+  BRAND_COLOR,
+  BRAND_FOOTER
+});
 
 // Serializes read-modify-write sequences per guild. Two members clicking the
 // panel at the same moment would otherwise both read the same ticketCounter
@@ -810,7 +829,8 @@ const GUILD_MANAGER_COMMANDS = new Set([
   'quick-setup',
   'ticket-panel',
   'ticket-section-add',
-  'tickets-refresh'
+  'tickets-refresh',
+  'streamer-setup'
 ]);
 
 function hasGuildManagerPermission(interaction) {
@@ -2786,6 +2806,7 @@ client.once(Events.ClientReady, (readyClient) => {
     });
     console.log(`Presence set to: ${BOT_ACTIVITY}`);
   }
+
   resyncSavedPanels().catch((error) => {
     console.error('Failed to resync saved ticket panels:', error);
   });
@@ -2798,6 +2819,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Silently ignore other guilds rather than replying: if a second process
     // is serving them, answering here would be the duplicate response.
     if (interaction.guildId && !isAllowedGuild(interaction.guildId)) return;
+
+    if (streamerApplications.isStreamerAppInteraction(interaction)) {
+      await streamerApplications.handleInteraction(interaction);
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       if (GUILD_MANAGER_COMMANDS.has(interaction.commandName) && !hasGuildManagerPermission(interaction)) {
         await interaction.reply({
@@ -2858,6 +2885,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
         pruneSetupSessions();
         await interaction.editReply({
           content: `Tickets refreshed. Total: ${result.total}, updated: ${result.updated}, failed: ${result.failed}.`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'streamer-setup') {
+        if (!streamerApplications.isConfigured()) {
+          await interaction.reply({
+            content: 'STREAMER_APPLICATION_CATEGORY_ID is not set, so this feature is disabled.',
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+        if (!interaction.channel?.isTextBased()) {
+          await interaction.reply({ content: 'Use this command in a text channel.', flags: MessageFlags.Ephemeral });
+          return;
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const result = await streamerApplications.publishPanel(interaction.guild, interaction.channel);
+        await interaction.editReply({
+          content: result.reused
+            ? `Streamer Application panel refreshed in <#${result.channel.id}>.`
+            : `Streamer Application panel published in <#${result.channel.id}>.`
         });
         return;
       }
