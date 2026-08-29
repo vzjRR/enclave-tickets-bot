@@ -877,7 +877,7 @@ function buildAdminPanel(channel) {
 }
 
 function createTicketEditModal(channel) {
-  const infoMatch = channel.topic?.match(/info=([^|]*)/);
+  const info = getTicketStateEntry(channel)?.info || '';
   return new ModalBuilder()
     .setCustomId('admin:edit-modal')
     .setTitle('Edit Ticket')
@@ -898,7 +898,7 @@ function createTicketEditModal(channel) {
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(false)
           .setMaxLength(500)
-          .setValue((infoMatch?.[1] || '').trim())
+          .setValue(info.trim())
       )
     );
 }
@@ -925,12 +925,8 @@ function buildUserPicker(action) {
 }
 
 async function setTicketInfo(channel, info) {
-  const cleanInfo = String(info || '').replace(/[|\r\n]+/g, ' ').trim().slice(0, 500);
-  const withoutOldInfo = (channel.topic || TICKET_MARKER)
-    .replace(/\s*\|\s*info=[^|]*/g, '')
-    .trim();
-  const nextTopic = cleanInfo ? `${withoutOldInfo} | info=${cleanInfo}` : withoutOldInfo;
-  await withTimeout(channel.setTopic(nextTopic.slice(0, 1024)), `Update ticket info for ${channel.id}`);
+  const cleanInfo = String(info || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 500);
+  await setTicketState(channel, { info: cleanInfo });
 }
 
 function buildTicketControls(status = 'open', claimedBy = null) {
@@ -1003,6 +999,8 @@ async function tryUpdatePinnedTicketControls(channel, status, claimedBy = null) 
 }
 
 async function refreshTicketChannel(channel) {
+  await migrateLegacyTicketTopicIfNeeded(channel);
+
   const status = getTicketStatus(channel) === 'closed' || channel.name.startsWith('closed-')
     ? 'closed'
     : 'open';
@@ -1041,19 +1039,26 @@ async function refreshGuildTickets(guild, source = 'manual') {
     if (index + 3 < tickets.length) await sleep(750);
   }
 
-  const config = getGuildConfig(guild.id);
-  if (config) {
-    const existingIds = new Set(tickets.map((channel) => channel.id));
-    const controlMessages = Object.fromEntries(
-      Object.entries(config.controlMessages || {}).filter(([id]) => existingIds.has(id))
-    );
-    setGuildConfig(guild.id, {
+  // Checked against the live channel cache, not the list fetched above -- a
+  // ticket opened while this sweep was still running must never be mistaken
+  // for one that no longer exists and get its state pruned out from under it.
+  const stillExists = (id) => guild.channels.cache.has(id);
+  updateGuildConfig(guild.id, (config) => {
+    if (!config) return null;
+    return {
       ...config,
-      controlMessages,
-      closedTicketIds: (config.closedTicketIds || []).filter((id) => existingIds.has(id)),
+      controlMessages: Object.fromEntries(
+        Object.entries(config.controlMessages || {}).filter(([id]) => stillExists(id))
+      ),
+      // Channels deleted outside closeAndArchiveTicket (manually, or a crash
+      // mid-close) would otherwise leave their state behind here forever.
+      ticketState: Object.fromEntries(
+        Object.entries(config.ticketState || {}).filter(([id]) => stillExists(id))
+      ),
+      closedTicketIds: (config.closedTicketIds || []).filter(stillExists),
       lastRefreshAt: new Date().toISOString()
-    });
-  }
+    };
+  });
 
   const failed = results.filter((result) => result.status === 'rejected').length;
   console.log(`Ticket refresh complete. guild=${guild.id} source=${source} total=${tickets.length} failed=${failed}`);
@@ -1080,19 +1085,53 @@ async function runAutomaticMaintenance() {
   }
 }
 
+// Ticket state (owner, section, claim status, ...) lives here rather than in
+// the channel topic. Discord shows a channel's topic to every member who
+// opens it -- above the first message, with no click needed -- so anything
+// placed there was effectively public, including the raw Discord IDs the bot
+// itself needs. Storage is bot-only.
+function getTicketStateEntry(channel) {
+  const guildId = channel?.guild?.id;
+  if (guildId) {
+    const stored = getGuildConfig(guildId)?.ticketState?.[channel.id];
+    if (stored) return stored;
+  }
+  // Tickets created before this migration still carry their data in the
+  // topic. Parse it once; migrateLegacyTicketTopicIfNeeded (called from
+  // refreshTicketChannel) copies it into storage and rewrites the topic the
+  // next time the maintenance sweep or /tickets-refresh reaches this channel.
+  return parseLegacyTicketTopic(channel?.topic);
+}
+
+function parseLegacyTicketTopic(topic) {
+  if (!topic || !topic.includes(TICKET_MARKER)) return null;
+
+  const field = (key) => topic.match(new RegExp(`${key}=([^|]*)`))?.[1]?.trim() || null;
+  const numericField = (key) => topic.match(new RegExp(`${key}=(\\d{17,20})(?![\\d])`))?.[1] || null;
+  const claimedAt = field('claimedAt');
+
+  return {
+    owner: numericField('owner'),
+    section: field('section') || 'Unknown',
+    ticketNumber: field('ticketNumber'),
+    lang: field('lang'),
+    status: field('status') || 'open',
+    claimedBy: numericField('claimedBy'),
+    claimedAt: claimedAt ? Number(claimedAt) : null,
+    info: field('info') || ''
+  };
+}
+
 function getTicketOwnerId(channel) {
-  const match = channel?.topic?.match(/owner=(\d{17,20})(?![\d])/);
-  return match?.[1] || null;
+  return getTicketStateEntry(channel)?.owner || null;
 }
 
 function getTicketStatus(channel) {
-  const match = channel?.topic?.match(/status=([a-z]+)/);
-  return match?.[1] || 'open';
+  return getTicketStateEntry(channel)?.status || 'open';
 }
 
 function getTicketClaimedBy(channel) {
-  const match = channel?.topic?.match(/claimedBy=(\d{17,20})(?![\d])/);
-  return match?.[1] || null;
+  return getTicketStateEntry(channel)?.claimedBy || null;
 }
 
 // ticketOwnerActivity is in-memory, so after a restart every claimed ticket
@@ -1133,101 +1172,109 @@ async function resolveTicketOwnerActivity(channel, claimedAt) {
 
 // The language the member picked in the panel, carried on the ticket so that a
 // claim or close hours later still speaks to them in it. Written once when the
-// channel is created, so it costs no extra channel edit against Discord's
-// roughly-two-per-ten-minutes topic limit.
+// channel is created.
 function getTicketLang(channel) {
-  return resolveLang(channel?.topic?.match(/lang=([a-z]{2})/)?.[1]);
+  return resolveLang(getTicketStateEntry(channel)?.lang);
 }
 
 function getTicketClaimedAt(channel) {
-  const match = channel?.topic?.match(/claimedAt=(\d+)/);
-  return match ? Number(match[1]) : null;
+  const value = getTicketStateEntry(channel)?.claimedAt;
+  return value ? Number(value) : null;
 }
 
 function getTicketNumber(channel) {
-  const topicMatch = channel?.topic?.match(/ticketNumber=(\d+)/);
-  if (topicMatch) return topicMatch[1];
+  const stateNumber = getTicketStateEntry(channel)?.ticketNumber;
+  if (stateNumber) return stateNumber;
 
   const nameMatch = channel?.name?.match(/(?:ticket|closed)-(?:ticket-)?(\d+)$/);
   return nameMatch?.[1] || null;
 }
 
-// The topic holds several independent keys, so every write is a merge. It has
-// to merge against what is actually on the channel right now: the maintenance
-// sweep writes status= from a channel list it fetched earlier, and if a member
-// was claimed in between, writing a stale topic back would silently drop
-// claimedBy. Re-reading first makes the last writer merge instead of clobber.
-async function setTicketTopicValue(channel, key, value) {
-  const fresh = await channel.guild.channels
-    .fetch(channel.id, { force: true })
-    .catch(() => channel);
+function getTicketSection(channel) {
+  return getTicketStateEntry(channel)?.section || 'Unknown';
+}
 
-  const topic = fresh.topic || TICKET_MARKER;
-  const pair = `${key}=${value}`;
-  const nextTopic = topic.includes(`${key}=`)
-    ? topic.replace(new RegExp(`${key}=[^|]+`), pair)
-    : `${topic} | ${pair}`;
+// Merges a patch into the ticket's stored state. Falls back to whatever the
+// legacy topic parses to as the base, so a not-yet-migrated ticket's first
+// write (a claim, a status change) migrates it rather than dropping the rest
+// of its fields.
+async function setTicketState(channel, patch) {
+  const guildId = channel?.guild?.id;
+  if (!guildId) return;
 
-  // Channel edits are capped at roughly two per ten minutes, so never spend
-  // one writing a topic that already says this.
-  if (nextTopic === fresh.topic) return;
+  updateGuildConfig(guildId, (config) => {
+    if (!config) return null;
+    const current = config.ticketState?.[channel.id] || parseLegacyTicketTopic(channel.topic) || {};
+    return {
+      ...config,
+      ticketState: {
+        ...(config.ticketState || {}),
+        [channel.id]: { ...current, ...patch }
+      }
+    };
+  });
+}
 
-  await fresh.setTopic(nextTopic.slice(0, 1024));
+function clearTicketState(guildId, channelId) {
+  updateGuildConfig(guildId, (config) => {
+    if (!config?.ticketState?.[channelId]) return null;
+    const ticketState = { ...config.ticketState };
+    delete ticketState[channelId];
+    return { ...config, ticketState };
+  });
 }
 
 async function trySetTicketTopicValue(channel, key, value) {
   try {
-    await withTimeout(
-      setTicketTopicValue(channel, key, value),
-      `Set ticket topic ${key} for ${channel.id}`,
-      4_000
-    );
+    await setTicketState(channel, { [key]: value });
     return true;
   } catch (error) {
-    console.error(`Failed to set ticket topic ${key}=${value} for ${channel.id}:`, error);
+    console.error(`Failed to set ticket ${key}=${value} for ${channel.id}:`, error);
     return false;
   }
 }
 
-// Same merge behaviour as setTicketTopicValue, but writes several keys in one
-// edit -- claiming a ticket sets claimedBy and claimedAt together, and the
-// channel topic edit rate limit (roughly 2 per 10 minutes) is too tight to
-// spend two edits on one action.
-async function setTicketTopicValues(channel, entries) {
-  const fresh = await channel.guild.channels
-    .fetch(channel.id, { force: true })
-    .catch(() => channel);
-
-  let topic = fresh.topic || TICKET_MARKER;
-  let changed = false;
-
-  for (const [key, value] of Object.entries(entries)) {
-    const pair = `${key}=${value}`;
-    if (topic.includes(`${key}=`)) {
-      const nextTopic = topic.replace(new RegExp(`${key}=[^|]+`), pair);
-      if (nextTopic !== topic) changed = true;
-      topic = nextTopic;
-    } else {
-      topic = `${topic} | ${pair}`;
-      changed = true;
-    }
-  }
-
-  if (!changed) return;
-  await fresh.setTopic(topic.slice(0, 1024));
-}
-
-async function trySetTicketTopicValues(channel, entries, label = 'topic values') {
+async function trySetTicketTopicValues(channel, entries, label = 'ticket state') {
   try {
-    await withTimeout(
-      setTicketTopicValues(channel, entries),
-      `Set ${label} for ${channel.id}`,
-      4_000
-    );
+    await setTicketState(channel, entries);
     return true;
   } catch (error) {
     console.error(`Failed to set ${label} for ${channel.id}:`, error);
     return false;
+  }
+}
+
+// The only thing ever shown to members in the channel's topic: no owner,
+// no claim state, no Discord IDs of any kind.
+function buildTicketTopic(sectionName, ticketNumber) {
+  const label = [ticketNumber ? `#${ticketNumber}` : null, sectionName].filter(Boolean).join(' — ');
+  const topic = label ? `${TICKET_MARKER} — ${label}` : TICKET_MARKER;
+  return topic.slice(0, 1024);
+}
+
+// One-time migration for tickets created before ticket state moved into
+// storage: copy what the topic parses to into storage, then rewrite the topic
+// to the clean, ID-free form. Idempotent -- a channel already migrated is a
+// no-op, so it is safe to call on every maintenance sweep.
+async function migrateLegacyTicketTopicIfNeeded(channel) {
+  const guildId = channel?.guild?.id;
+  if (!guildId) return;
+
+  const config = getGuildConfig(guildId);
+  if (config?.ticketState?.[channel.id]) return;
+
+  const legacy = parseLegacyTicketTopic(channel.topic);
+  if (!legacy) return;
+
+  await setTicketState(channel, legacy);
+
+  const prettyTopic = buildTicketTopic(legacy.section, legacy.ticketNumber);
+  if (channel.topic === prettyTopic) return;
+
+  try {
+    await withTimeout(channel.setTopic(prettyTopic), `Migrate ticket topic for ${channel.id}`, 4_000);
+  } catch (error) {
+    console.error(`Failed to migrate legacy ticket topic for ${channel.id}:`, error?.message || error);
   }
 }
 
@@ -1631,11 +1678,7 @@ async function findExistingMemberTicket(guild, userId, config) {
   const closedTicketIds = new Set(Array.isArray(config.closedTicketIds) ? config.closedTicketIds : []);
 
   return channels.find((channel) => {
-    if (
-      channel?.type !== ChannelType.GuildText ||
-      !channel.topic?.includes(TICKET_MARKER) ||
-      !channel.topic?.includes(`owner=${userId}`)
-    ) {
+    if (!isTicketChannel(channel) || getTicketOwnerId(channel) !== userId) {
       return false;
     }
 
@@ -1674,11 +1717,6 @@ async function dmUser(userId, payload, label) {
     console.error(`Failed to DM ${label} to ${userId}:`, error?.message || error);
     return false;
   }
-}
-
-function getTicketSection(channel) {
-  const match = channel?.topic?.match(/section=([^|]*)/);
-  return match?.[1]?.trim() || 'Unknown';
 }
 
 function getTicketControlMessageId(channel) {
@@ -1924,6 +1962,7 @@ async function closeAndArchiveTicket(channel, closedById) {
   pendingChannelRenames.delete(channel.id);
   clearPendingTicketRename(channel.guild.id, channel.id);
   clearTicketControlMessageId(channel.guild.id, channel.id);
+  clearTicketState(channel.guild.id, channel.id);
   setTicketClosedState(channel.guild.id, channel.id, false);
   ticketOwnerActivity.delete(channel.id);
 
@@ -2090,8 +2129,19 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en' 
     name: channelName,
     type: ChannelType.GuildText,
     parent: section.categoryId,
-    topic: `${TICKET_MARKER} | owner=${user.id} | section=${section.name} | ticketNumber=${ticketNumber} | originalName=${channelName} | instance=${config.ticketInstanceId} | lang=${resolveLang(lang)} | status=open`,
+    topic: buildTicketTopic(section.name, ticketNumber),
     permissionOverwrites
+  });
+
+  await setTicketState(channel, {
+    owner: user.id,
+    section: section.name,
+    ticketNumber: String(ticketNumber),
+    lang: resolveLang(lang),
+    status: 'open',
+    claimedBy: null,
+    claimedAt: null,
+    info: ''
   });
 
   const staffMentions = section.roleIds.map((roleId) => `<@&${roleId}>`).join(' ');
