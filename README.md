@@ -254,6 +254,7 @@ staff-only.
 | --- | --- |
 | `/quick-setup` | Manage Server |
 | `/setup`, `/ticket-panel`, `/ticket-section-add`, `/tickets-refresh` | Manage Server |
+| `/streamer-setup`, `/admin-application-image` | Manage Server |
 | `/ticket-admin` | Manage Messages or Manage Channels in the ticket |
 | `/ticket-close` | Ticket staff, **or** the member who opened it |
 | `/ticket-add`, `/ticket-remove`, `/ticket-rename` | Ticket staff |
@@ -358,6 +359,21 @@ set, run **`/streamer-setup`** in whichever channel should host the panel;
 it posts one embed with a single **🎥 تقديم طلب** button, and running the
 command again edits that same message in place rather than posting a
 duplicate (wherever it currently lives, even a different channel).
+
+## Panel banner images
+
+The support-ticket panel and the Streamer Application panel each show a
+designed banner graphic (`assets/panel-support.png`, `assets/panel-streamer.png`)
+instead of a written description — it ships with the code, so every guild
+gets it automatically with no setup step. Run `/ticket-panel image:<file>` or
+`/streamer-setup image:<file>` to override it with a different image for one
+guild; the bot downloads the attachment once and keeps its own copy
+(`data/panel-images/`), re-attaching it on every future edit so the panel
+keeps working even after Discord's own signed attachment URL for the
+original upload expires. `/admin-application-image image:<file>` saves a
+per-guild override banner for the Administration Application feature ahead
+of it being built (`assets/panel-admin-application.png` is its bundled
+default, ready for whenever that command gets wired to a live panel).
 
 **The wizard.** Each of the 46 questions is answered one at a time —
 free-text questions open a modal (grouped up to 5 per modal, under Discord's

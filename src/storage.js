@@ -123,6 +123,7 @@ function updateGuildConfig(guildId, mutator) {
 }
 
 module.exports = {
+  DATA_DIR,
   ensureDb,
   getAllGuildConfigs,
   getGuildConfig,

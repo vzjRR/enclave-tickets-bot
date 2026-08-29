@@ -27,7 +27,10 @@ const {
   MessageFlags
 } = require('discord.js');
 
-const { getGuildConfig, updateGuildConfig } = require('./storage');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const { DATA_DIR, getGuildConfig, updateGuildConfig } = require('./storage');
 
 const PANEL_TITLE = '🎥 التقديم للانضمام كستريمر - Streamer Application';
 const PANEL_DESCRIPTION =
@@ -338,8 +341,55 @@ function isConfigured() {
   return Boolean(STREAMER_APPLICATION_CATEGORY_ID);
 }
 
-function buildPanelEmbed() {
-  return brandEmbed().setTitle(PANEL_TITLE).setDescription(PANEL_DESCRIPTION);
+// A custom banner image (uploaded via /streamer-setup's attachment option) is
+// saved to disk rather than kept as the Discord CDN URL handed back at
+// upload time -- that URL is signed and expires in about a day, so storing
+// it verbatim would quietly break the panel the next time it rendered.
+const PANEL_IMAGES_DIR = path.join(DATA_DIR, 'panel-images');
+const MAX_PANEL_IMAGE_BYTES = 8 * 1024 * 1024;
+
+// Ships with the code, so every guild gets the designed banner with zero
+// setup; a guild can still override it with its own upload via
+// /streamer-setup's `image` option, which takes priority when present.
+const DEFAULT_STREAMER_PANEL_IMAGE = path.join(__dirname, '..', 'assets', 'panel-streamer.png');
+
+async function downloadPanelImage(attachment, filenamePrefix) {
+  if (!attachment.contentType?.startsWith('image/')) {
+    throw new Error('That attachment is not an image.');
+  }
+  if (attachment.size > MAX_PANEL_IMAGE_BYTES) {
+    throw new Error(`Image is too large (max ${Math.floor(MAX_PANEL_IMAGE_BYTES / 1024 / 1024)} MB).`);
+  }
+
+  const response = await fetch(attachment.url);
+  if (!response.ok) throw new Error(`Failed to download attachment: HTTP ${response.status}`);
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  const ext = (path.extname(attachment.name || '') || '.png').toLowerCase();
+  if (!fs.existsSync(PANEL_IMAGES_DIR)) fs.mkdirSync(PANEL_IMAGES_DIR, { recursive: true });
+  const filename = `${filenamePrefix}${ext}`;
+  fs.writeFileSync(path.join(PANEL_IMAGES_DIR, filename), buffer);
+  return filename;
+}
+
+function resolvePanelImageAttachment(filename) {
+  const filePath = filename ? path.join(PANEL_IMAGES_DIR, filename) : DEFAULT_STREAMER_PANEL_IMAGE;
+  if (!fs.existsSync(filePath)) return null;
+
+  const name = `panel-image${path.extname(filePath) || '.png'}`;
+  return { attachment: new AttachmentBuilder(filePath, { name }), name };
+}
+
+function buildPanelEmbed(imageAttachment = null) {
+  const embed = brandEmbed().setTitle(PANEL_TITLE);
+  // A banner image already carries the message as artwork, so it replaces
+  // the written description rather than sitting alongside it.
+  if (imageAttachment) {
+    embed.setImage(`attachment://${imageAttachment.name}`);
+  } else {
+    embed.setDescription(PANEL_DESCRIPTION);
+  }
+  return embed;
 }
 
 function buildPanelComponents() {
@@ -353,11 +403,25 @@ function buildPanelComponents() {
 // Posts a fresh panel in `channel`, or edits the previously saved one in
 // place if this guild already has one (anywhere, not just in this channel --
 // matching /quick-setup's own "one panel, edited in place" behaviour).
-async function publishPanel(guild, channel) {
+// `uploadedImage` is the optional attachment from /streamer-setup's `image`
+// option; when omitted, whatever banner was saved from a previous run (if
+// any) keeps being used.
+async function publishPanel(guild, channel, uploadedImage = null) {
   const config = getGuildConfig(guild.id) || {};
-  const saved = config.streamerApplicationPanel;
-  const payload = { embeds: [buildPanelEmbed()], components: buildPanelComponents() };
+  let imageFile = config.streamerApplicationPanel?.imageFile || null;
 
+  if (uploadedImage) {
+    imageFile = await downloadPanelImage(uploadedImage, `${guild.id}-streamer`);
+  }
+
+  const imageAttachment = resolvePanelImageAttachment(imageFile);
+  const payload = {
+    embeds: [buildPanelEmbed(imageAttachment)],
+    components: buildPanelComponents(),
+    files: imageAttachment ? [imageAttachment.attachment] : []
+  };
+
+  const saved = config.streamerApplicationPanel;
   if (saved?.channelId && saved?.messageId) {
     const existingChannel = saved.channelId === channel.id
       ? channel
@@ -367,7 +431,13 @@ async function publishPanel(guild, channel) {
       : null;
 
     if (existingMessage) {
-      await existingMessage.edit(payload);
+      // Editing with `files` alone appends rather than replacing, so old
+      // attachments have to be cleared explicitly to actually swap the banner.
+      await existingMessage.edit({ ...payload, attachments: [] });
+      deps.setGuildConfig(guild.id, {
+        ...config,
+        streamerApplicationPanel: { ...saved, imageFile }
+      });
       if (existingChannel.id !== channel.id) {
         return { ok: true, channel: existingChannel, movedFrom: null, reused: true };
       }
@@ -378,7 +448,7 @@ async function publishPanel(guild, channel) {
   const message = await channel.send(payload);
   deps.setGuildConfig(guild.id, {
     ...config,
-    streamerApplicationPanel: { channelId: channel.id, messageId: message.id }
+    streamerApplicationPanel: { channelId: channel.id, messageId: message.id, imageFile }
   });
   return { ok: true, channel, reused: false };
 }

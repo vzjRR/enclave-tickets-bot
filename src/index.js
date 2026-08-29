@@ -1,5 +1,8 @@
 require('dotenv').config();
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const {
   ActionRowBuilder,
   ActivityType,
@@ -23,6 +26,7 @@ const {
 } = require('discord.js');
 
 const {
+  DATA_DIR,
   ensureDb,
   getAllGuildConfigs,
   getGuildConfig,
@@ -581,15 +585,68 @@ function parseSectionEmoji(value) {
   };
 }
 
-function buildPanelEmbed(config) {
+// Custom panel banner images (uploaded via a slash command attachment option)
+// are saved to disk here rather than kept as the Discord CDN URL Discord
+// handed back at upload time -- that URL is signed and expires in about a
+// day, so a config that stored it verbatim would quietly break the panel the
+// next time it rendered. Keeping our own copy and re-attaching it to whatever
+// message we send avoids depending on that URL ever again.
+const PANEL_IMAGES_DIR = path.join(DATA_DIR, 'panel-images');
+const MAX_PANEL_IMAGE_BYTES = 8 * 1024 * 1024;
+
+// Ships with the code, so every guild gets the designed banner with zero
+// setup; a guild can still override it with its own upload via
+// /ticket-panel's `image` option, which takes priority when present.
+const DEFAULT_SUPPORT_PANEL_IMAGE = path.join(__dirname, '..', 'assets', 'panel-support.png');
+
+function ensurePanelImagesDir() {
+  if (!fs.existsSync(PANEL_IMAGES_DIR)) fs.mkdirSync(PANEL_IMAGES_DIR, { recursive: true });
+}
+
+async function downloadPanelImage(attachment, filenamePrefix) {
+  if (!attachment.contentType?.startsWith('image/')) {
+    throw new Error('That attachment is not an image.');
+  }
+  if (attachment.size > MAX_PANEL_IMAGE_BYTES) {
+    throw new Error(`Image is too large (max ${Math.floor(MAX_PANEL_IMAGE_BYTES / 1024 / 1024)} MB).`);
+  }
+
+  const response = await fetch(attachment.url);
+  if (!response.ok) throw new Error(`Failed to download attachment: HTTP ${response.status}`);
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  const ext = (path.extname(attachment.name || '') || '.png').toLowerCase();
+  ensurePanelImagesDir();
+  const filename = `${filenamePrefix}${ext}`;
+  fs.writeFileSync(path.join(PANEL_IMAGES_DIR, filename), buffer);
+  return filename;
+}
+
+// Builds the { attachment, name } pair every send/edit call needs to both
+// upload the file and reference it from the embed via attachment://<name>.
+// Falls back to the bundled default banner when no per-guild upload exists.
+function resolvePanelImageAttachment(filename) {
+  const filePath = filename ? path.join(PANEL_IMAGES_DIR, filename) : DEFAULT_SUPPORT_PANEL_IMAGE;
+  if (!fs.existsSync(filePath)) return null;
+
+  const name = `panel-image${path.extname(filePath) || '.png'}`;
+  return { attachment: new AttachmentBuilder(filePath, { name }), name };
+}
+
+function buildPanelEmbed(config, imageAttachment = null) {
   const custom = config || {};
+  const hasImage = Boolean(imageAttachment) || isHttpUrl(custom.imageUrl);
 
   const embed = new EmbedBuilder()
     .setColor(custom.color || BRAND_COLOR)
     .setTitle(custom.title || PANEL_TITLE)
-    .setDescription(custom.description || PANEL_DESCRIPTION)
     .setFooter({ text: BRAND_FOOTER })
     .setTimestamp();
+
+  // A banner image already carries the message -- title, description,
+  // branding -- baked in as artwork, so it replaces the written description
+  // rather than sitting above or below it.
+  if (!hasImage) embed.setDescription(custom.description || PANEL_DESCRIPTION);
 
   // The bot's own avatar is a Discord-hosted image, so the panel gets artwork
   // without depending on some external host staying up.
@@ -597,7 +654,12 @@ function buildPanelEmbed(config) {
   if (icon) embed.setThumbnail(icon);
 
   if (isHttpUrl(custom.thumbnailUrl)) embed.setThumbnail(custom.thumbnailUrl);
-  if (isHttpUrl(custom.imageUrl)) embed.setImage(custom.imageUrl);
+
+  if (imageAttachment) {
+    embed.setImage(`attachment://${imageAttachment.name}`);
+  } else if (isHttpUrl(custom.imageUrl)) {
+    embed.setImage(custom.imageUrl);
+  }
 
   return embed;
 }
@@ -830,7 +892,8 @@ const GUILD_MANAGER_COMMANDS = new Set([
   'ticket-panel',
   'ticket-section-add',
   'tickets-refresh',
-  'streamer-setup'
+  'streamer-setup',
+  'admin-application-image'
 ]);
 
 function hasGuildManagerPermission(interaction) {
@@ -1568,9 +1631,11 @@ async function publishPanel(interaction, session) {
   }
 
   const setupConfig = ensureTicketInstance(session.config);
+  const imageAttachment = resolvePanelImageAttachment(setupConfig.panelImageFile);
   const message = await channel.send({
-    embeds: [buildPanelEmbed(setupConfig)],
-    components: [buildPanelMenu(setupConfig)]
+    embeds: [buildPanelEmbed(setupConfig, imageAttachment)],
+    components: [buildPanelMenu(setupConfig)],
+    files: imageAttachment ? [imageAttachment.attachment] : []
   });
 
   const finalConfig = {
@@ -1601,7 +1666,17 @@ async function updateSavedPanel(guild, config) {
   const message = await channel.messages.fetch(config.messageId).catch(() => null);
   if (!message) return { ok: false, reason: 'missing_message' };
 
-  await message.edit({ embeds: [buildPanelEmbed(config)], components: [menu] });
+  const imageAttachment = resolvePanelImageAttachment(config.panelImageFile);
+  await message.edit({
+    embeds: [buildPanelEmbed(config, imageAttachment)],
+    components: [menu],
+    // Editing with `files` alone appends to a message's existing attachments
+    // rather than replacing them -- clearing `attachments` first is what
+    // actually swaps the banner instead of piling up a duplicate on every
+    // resync.
+    attachments: [],
+    files: imageAttachment ? [imageAttachment.attachment] : []
+  });
   return { ok: true, channel, message };
 }
 
@@ -1634,7 +1709,7 @@ async function resyncSavedPanels() {
 }
 
 async function resendSavedPanel(interaction) {
-  const config = getGuildConfig(interaction.guildId);
+  let config = getGuildConfig(interaction.guildId);
 
   if (!config?.sections?.length) {
     await interaction.reply({
@@ -1652,10 +1727,24 @@ async function resendSavedPanel(interaction) {
     return;
   }
 
+  const uploadedImage = interaction.options?.getAttachment?.('image');
+  if (uploadedImage) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const filename = await downloadPanelImage(uploadedImage, `${interaction.guildId}-support`);
+      config = { ...config, panelImageFile: filename };
+    } catch (error) {
+      await interaction.editReply({ content: `Could not use that image: ${error.message}` });
+      return;
+    }
+  }
+
   const panelConfig = ensureTicketInstance(config);
+  const imageAttachment = resolvePanelImageAttachment(panelConfig.panelImageFile);
   const message = await interaction.channel.send({
-    embeds: [buildPanelEmbed(panelConfig)],
-    components: [buildPanelMenu(panelConfig)]
+    embeds: [buildPanelEmbed(panelConfig, imageAttachment)],
+    components: [buildPanelMenu(panelConfig)],
+    files: imageAttachment ? [imageAttachment.attachment] : []
   });
 
   setGuildConfig(interaction.guildId, {
@@ -1665,10 +1754,12 @@ async function resendSavedPanel(interaction) {
     updatedAt: new Date().toISOString()
   });
 
-  await interaction.reply({
-    content: `Ticket panel sent in <#${interaction.channelId}>.`,
-    flags: MessageFlags.Ephemeral
-  });
+  const reply = { content: `Ticket panel sent in <#${interaction.channelId}>.` };
+  if (uploadedImage) {
+    await interaction.editReply(reply);
+  } else {
+    await interaction.reply({ ...reply, flags: MessageFlags.Ephemeral });
+  }
 }
 
 async function findExistingMemberTicket(guild, userId, config) {
@@ -2642,11 +2733,18 @@ async function publishPanelMessage(guild, config, channel, prevChannelId, prevMe
   const menu = buildPanelMenu(config);
   if (!menu) return null;
 
-  const payload = { embeds: [buildPanelEmbed(config)], components: [menu] };
+  const imageAttachment = resolvePanelImageAttachment(config.panelImageFile);
+  const payload = {
+    embeds: [buildPanelEmbed(config, imageAttachment)],
+    components: [menu],
+    files: imageAttachment ? [imageAttachment.attachment] : []
+  };
 
   if (prevMessageId && prevChannelId === channel.id) {
     const existing = await channel.messages.fetch(prevMessageId).catch(() => null);
-    if (existing) return existing.edit(payload);
+    // Editing with `files` alone appends rather than replacing, so old
+    // attachments have to be cleared explicitly to actually swap the banner.
+    if (existing) return existing.edit({ ...payload, attachments: [] });
   } else if (prevMessageId && prevChannelId) {
     const oldChannel = await guild.channels.fetch(prevChannelId).catch(() => null);
     const oldMessage = oldChannel?.isTextBased()
@@ -2952,11 +3050,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const result = await streamerApplications.publishPanel(interaction.guild, interaction.channel);
+        const uploadedImage = interaction.options.getAttachment('image');
+        let result;
+        try {
+          result = await streamerApplications.publishPanel(interaction.guild, interaction.channel, uploadedImage);
+        } catch (error) {
+          await interaction.editReply({ content: `Could not publish the panel: ${error.message}` });
+          return;
+        }
         await interaction.editReply({
           content: result.reused
             ? `Streamer Application panel refreshed in <#${result.channel.id}>.`
             : `Streamer Application panel published in <#${result.channel.id}>.`
+        });
+        return;
+      }
+
+      // The Administration Application feature itself isn't built yet -- this
+      // just banks the banner image so it's ready for whenever it is, the
+      // same way the support and streamer panels already store theirs.
+      if (interaction.commandName === 'admin-application-image') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const uploadedImage = interaction.options.getAttachment('image', true);
+        try {
+          const filename = await downloadPanelImage(uploadedImage, `${interaction.guildId}-admin`);
+          updateGuildConfig(interaction.guildId, (config) => ({
+            ...(config || {}),
+            adminApplicationImageFile: filename
+          }));
+        } catch (error) {
+          await interaction.editReply({ content: `Could not use that image: ${error.message}` });
+          return;
+        }
+        await interaction.editReply({
+          content: 'Saved. It will be used once the Administration Application feature is built.'
         });
         return;
       }

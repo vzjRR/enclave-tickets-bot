@@ -56,7 +56,12 @@ const commands = [
     .setName('ticket-panel')
     .setDescription('Resend the saved ticket panel in this channel')
     .setContexts(guildOnly)
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addAttachmentOption((option) =>
+      option
+        .setName('image')
+        .setDescription('Banner image to show instead of the written description (optional)')
+    ),
   new SlashCommandBuilder()
     .setName('ticket-section-add')
     .setDescription('Add a new ticket section to the saved panel')
@@ -71,7 +76,20 @@ const commands = [
     .setName('streamer-setup')
     .setDescription('Publish (or refresh) the standalone Streamer Application panel in this channel')
     .setContexts(guildOnly)
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addAttachmentOption((option) =>
+      option
+        .setName('image')
+        .setDescription('Banner image to show instead of the written description (optional)')
+    ),
+  new SlashCommandBuilder()
+    .setName('admin-application-image')
+    .setDescription('Save the Administration Application banner image for when that feature is built')
+    .setContexts(guildOnly)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addAttachmentOption((option) =>
+      option.setName('image').setDescription('Banner image').setRequired(true)
+    ),
   new SlashCommandBuilder()
     .setName('ticket-admin')
     .setDescription('Open the private admin panel for the current ticket')
