@@ -415,25 +415,6 @@ objects — no token or live guild needed, and it never touches the real
 and cleans up after itself). It is the fastest way to catch a regression in
 this module; it does not replace clicking through the flow in Discord.
 
-## Zero-tolerance channel
-
-Set `ZERO_TOLERANCE_CHANNEL_ID` to a channel id and any message posted there
-gets its author removed immediately — no permission check, no warning, and
-it applies regardless of role. The message is deleted, a DM explains why
-(bilingual, before they're removed — a DM sent after can silently fail to
-even open once the bot no longer shares a server with them), and then:
-
-- 1st and 2nd violation: kicked. They can rejoin.
-- 3rd violation: banned.
-
-Violation counts persist per member in `data/tickets.json` and never reset
-on their own. Leave the variable empty (the default) to disable the feature
-entirely. The bot needs **Kick Members** and **Ban Members**; Discord itself
-still refuses to let any bot act against the server owner, or against anyone
-whose top role sits at or above the bot's own — no permission grant changes
-that, so the bot's role needs to sit above whoever this should actually
-catch.
-
 ## Data and backups
 
 Everything persistent is `data/tickets.json`: panel configuration, sections, the
