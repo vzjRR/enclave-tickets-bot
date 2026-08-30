@@ -83,12 +83,14 @@ const commands = [
         .setDescription('Banner image to show instead of the written description (optional)')
     ),
   new SlashCommandBuilder()
-    .setName('admin-application-image')
-    .setDescription('Save the Administration Application banner image for when that feature is built')
+    .setName('admin-application-setup')
+    .setDescription('Publish (or refresh) the standalone Admin Application panel in this channel')
     .setContexts(guildOnly)
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addAttachmentOption((option) =>
-      option.setName('image').setDescription('Banner image').setRequired(true)
+      option
+        .setName('image')
+        .setDescription('Banner image to show instead of the written description (optional)')
     ),
   new SlashCommandBuilder()
     .setName('ticket-admin')

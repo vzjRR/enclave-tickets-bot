@@ -35,6 +35,7 @@ const {
 } = require('./storage');
 
 const streamerApplications = require('./streamerApplications');
+const adminApplication = require('./adminApplication');
 
 const BRAND_NAME = 'Enclave Tickets';
 const BRAND_COLOR = 0x90773E;
@@ -343,6 +344,15 @@ streamerApplications.init({
   createTicket,
   isTicketRateLimitExempt,
   consumeTicketRateLimit,
+  setGuildConfig,
+  BRAND_COLOR,
+  BRAND_FOOTER
+});
+
+adminApplication.init({
+  client,
+  dmUser,
+  collectStaffRecipients,
   setGuildConfig,
   BRAND_COLOR,
   BRAND_FOOTER
@@ -895,7 +905,7 @@ const GUILD_MANAGER_COMMANDS = new Set([
   'ticket-section-add',
   'tickets-refresh',
   'streamer-setup',
-  'admin-application-image'
+  'admin-application-setup'
 ]);
 
 function hasGuildManagerPermission(interaction) {
@@ -2238,31 +2248,40 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en' 
   });
 
   const staffMentions = section.roleIds.map((roleId) => `<@&${roleId}>`).join(' ');
-  const openedAt = Math.floor(Date.now() / 1000);
-  // This embed sits in the member's own ticket and is addressed to them, so it
-  // follows their language. Staff keep an English record either way: the staff
-  // alert DM and the archive written to the log channel are both unlocalised.
-  const ui = t(lang);
   const localSectionName = translateSectionName(section.name, lang);
-  const embed = new EmbedBuilder()
-    .setColor(BRAND_COLOR)
-    .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${localSectionName}`)
-    .setDescription(reason)
-    .addFields(
-      { name: ui.openedBy, value: `<@${user.id}>`, inline: true },
-      { name: ui.category, value: localSectionName, inline: true },
-      { name: ui.ticketNumber, value: `#${ticketNumber}`, inline: true },
-      { name: ui.openedAt, value: `<t:${openedAt}:f>`, inline: true }
-    )
-    .setFooter({ text: BRAND_FOOTER })
-    .setTimestamp();
 
-  if (isHttpUrl(config.thumbnailUrl)) embed.setThumbnail(config.thumbnailUrl);
+  // Same banner the panel shows: the ticket-welcome message carries no text
+  // of its own (no title, opener/category/reason fields, footer or
+  // timestamp) -- just the image and the Claim/Close/Admin Panel controls
+  // below it. Falls back to the old text layout only if the image asset is
+  // ever missing.
+  const imageAttachment = resolvePanelImageAttachment(config.panelImageFile);
+  const embed = new EmbedBuilder().setColor(BRAND_COLOR);
+
+  if (imageAttachment) {
+    embed.setImage(`attachment://${imageAttachment.name}`);
+  } else {
+    const ui = t(lang);
+    const openedAt = Math.floor(Date.now() / 1000);
+    embed
+      .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${localSectionName}`)
+      .setDescription(reason)
+      .addFields(
+        { name: ui.openedBy, value: `<@${user.id}>`, inline: true },
+        { name: ui.category, value: localSectionName, inline: true },
+        { name: ui.ticketNumber, value: `#${ticketNumber}`, inline: true },
+        { name: ui.openedAt, value: `<t:${openedAt}:f>`, inline: true }
+      )
+      .setFooter({ text: BRAND_FOOTER })
+      .setTimestamp();
+    if (isHttpUrl(config.thumbnailUrl)) embed.setThumbnail(config.thumbnailUrl);
+  }
 
   const pinned = await channel.send({
     content: `${staffMentions} <@${user.id}>`.trim(),
     embeds: [embed],
     components: buildTicketControls(),
+    files: imageAttachment ? [imageAttachment.attachment] : [],
     // Deliberately no @everyone. Ticket creation is member-triggered, so pinging
     // the whole server on each one is a mass-notification abuse vector; the
     // responsible staff roles and the owner are the only people who need it.
@@ -2975,6 +2994,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (adminApplication.isAdminApplicationInteraction(interaction)) {
+      await adminApplication.handleInteraction(interaction);
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       if (GUILD_MANAGER_COMMANDS.has(interaction.commandName) && !hasGuildManagerPermission(interaction)) {
         await interaction.reply({
@@ -3068,24 +3092,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // The Administration Application feature itself isn't built yet -- this
-      // just banks the banner image so it's ready for whenever it is, the
-      // same way the support and streamer panels already store theirs.
-      if (interaction.commandName === 'admin-application-image') {
+      if (interaction.commandName === 'admin-application-setup') {
+        if (!adminApplication.isConfigured()) {
+          await interaction.reply({
+            content: 'ADMIN_APPLICATION_REVIEW_ROLE_ID is not set, so this feature is disabled.',
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+        if (!interaction.channel?.isTextBased()) {
+          await interaction.reply({ content: 'Use this command in a text channel.', flags: MessageFlags.Ephemeral });
+          return;
+        }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const uploadedImage = interaction.options.getAttachment('image', true);
+        const uploadedImage = interaction.options.getAttachment('image');
+        let result;
         try {
-          const filename = await downloadPanelImage(uploadedImage, `${interaction.guildId}-admin`);
-          updateGuildConfig(interaction.guildId, (config) => ({
-            ...(config || {}),
-            adminApplicationImageFile: filename
-          }));
+          result = await adminApplication.publishPanel(interaction.guild, interaction.channel, uploadedImage);
         } catch (error) {
-          await interaction.editReply({ content: `Could not use that image: ${error.message}` });
+          await interaction.editReply({ content: `Could not publish the panel: ${error.message}` });
           return;
         }
         await interaction.editReply({
-          content: 'Saved. It will be used once the Administration Application feature is built.'
+          content: result.reused
+            ? `Admin Application panel refreshed in <#${result.channel.id}>.`
+            : `Admin Application panel published in <#${result.channel.id}>.`
         });
         return;
       }

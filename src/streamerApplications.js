@@ -650,15 +650,25 @@ async function startApplication(channel, user, member = null) {
 
   saveApplication(channel.guild.id, application);
 
-  const welcome = brandEmbed()
-    .setTitle('🎥 طلب انضمام كستريمر')
-    .setDescription(
-      `مرحباً <@${user.id}>!\n\n` +
-      'سيتكون هذا الطلب من عدة أقسام (7 مراحل). أجب على كل سؤال بالضغط على الزر الظاهر، ' +
-      'وسينتقل البوت تلقائياً للسؤال التالي دون الحاجة لترقيم إجاباتك.\n\n' +
-      `رقم الطلب: **${applicationId}**`
-    );
-  await channel.send({ embeds: [welcome] }).catch(() => {});
+  // Same banner the panel shows: the ticket-welcome message carries no text
+  // of its own -- just the image, with the actual first wizard question
+  // (renderStep, below) as the interactive part underneath it.
+  const config = getGuildConfig(channel.guild.id) || {};
+  const imageAttachment = resolvePanelImageAttachment(config.streamerApplicationPanel?.imageFile);
+  const welcome = imageAttachment
+    ? new EmbedBuilder().setColor(deps.BRAND_COLOR).setImage(`attachment://${imageAttachment.name}`)
+    : brandEmbed()
+        .setTitle('🎥 طلب انضمام كستريمر')
+        .setDescription(
+          `مرحباً <@${user.id}>!\n\n` +
+          'سيتكون هذا الطلب من عدة أقسام (7 مراحل). أجب على كل سؤال بالضغط على الزر الظاهر، ' +
+          'وسينتقل البوت تلقائياً للسؤال التالي دون الحاجة لترقيم إجاباتك.\n\n' +
+          `رقم الطلب: **${applicationId}**`
+        );
+  await channel.send({
+    embeds: [welcome],
+    files: imageAttachment ? [imageAttachment.attachment] : []
+  }).catch(() => {});
 
   await renderStep(channel, application, { asUpdate: false });
   log(`Application ${applicationId} started by ${user.id} in guild ${channel.guild.id}`);

@@ -254,7 +254,7 @@ staff-only.
 | --- | --- |
 | `/quick-setup` | Manage Server |
 | `/setup`, `/ticket-panel`, `/ticket-section-add`, `/tickets-refresh` | Manage Server |
-| `/streamer-setup`, `/admin-application-image` | Manage Server |
+| `/streamer-setup`, `/admin-application-setup` | Manage Server |
 | `/ticket-admin` | Manage Messages or Manage Channels in the ticket |
 | `/ticket-close` | Ticket staff, **or** the member who opened it |
 | `/ticket-add`, `/ticket-remove`, `/ticket-rename` | Ticket staff |
@@ -362,20 +362,25 @@ duplicate (wherever it currently lives, even a different channel).
 
 ## Panel banner images
 
-The support-ticket panel and the Streamer Application panel each show a
-designed banner graphic (`assets/panel-support.png`, `assets/panel-streamer.png`)
-instead of a written description — it ships with the code, so every guild
+Every panel — support tickets, Streamer Application, Admin Application — shows
+a designed banner graphic instead of a written description
+(`assets/panel-support.png`, `assets/panel-streamer.png`,
+`assets/panel-admin-application.png`). It ships with the code, so every guild
 gets it automatically with no setup step. With a banner set, the embed shows
-*only* the image (no title, footer, timestamp, or thumbnail); the panel's own
-menu or button still sits below it as a separate message component. Run `/ticket-panel image:<file>` or
-`/streamer-setup image:<file>` to override it with a different image for one
+*only* the image (no title, description, footer, timestamp, or thumbnail);
+the panel's own menu or button still sits below it as a separate message
+component. The same is true of the message a ticket opens with: the support
+ticket's welcome message and the Streamer Application's welcome message both
+show only the same banner as their panel, with the ticket's own controls (or
+the wizard's first question) underneath — no opener/category/reason fields,
+no title, no footer.
+
+Run `/ticket-panel image:<file>`, `/streamer-setup image:<file>`, or
+`/admin-application-setup image:<file>` to override a panel's image for one
 guild; the bot downloads the attachment once and keeps its own copy
-(`data/panel-images/`), re-attaching it on every future edit so the panel
-keeps working even after Discord's own signed attachment URL for the
-original upload expires. `/admin-application-image image:<file>` saves a
-per-guild override banner for the Administration Application feature ahead
-of it being built (`assets/panel-admin-application.png` is its bundled
-default, ready for whenever that command gets wired to a live panel).
+(`data/panel-images/`), re-attaching it on every future edit (panel *and*
+ticket-welcome message) so it keeps working even after Discord's own signed
+attachment URL for the original upload expires.
 
 **The wizard.** Each of the 46 questions is answered one at a time —
 free-text questions open a modal (grouped up to 5 per modal, under Discord's
@@ -414,6 +419,25 @@ objects — no token or live guild needed, and it never touches the real
 `data/` (it points storage at a scratch temp directory via `TICKETS_DATA_DIR`
 and cleans up after itself). It is the fastest way to catch a regression in
 this module; it does not replace clicking through the flow in Discord.
+
+## Admin Application
+
+The simplest of the three application panels (`src/adminApplication.js`,
+same self-contained/injected-dependencies shape as `streamerApplications.js`):
+one button, one modal, one free-text field, Arabic-only. There is no ticket
+channel, no wizard, and no stored application record — clicking **📋 طلب
+تقديم للإدارة** opens a modal with a single paragraph field, and submitting it
+DMs every member holding a role in `ADMIN_APPLICATION_REVIEW_ROLE_ID`
+(comma-separated for more than one) with the applicant and their text. That
+DM step is the entire flow.
+
+Set `ADMIN_APPLICATION_REVIEW_ROLE_ID` to enable it — with that unset,
+`/admin-application-setup` refuses to run. It also needs
+`ENABLE_GUILD_MEMBERS=true` to actually resolve who holds those roles (the
+same intent the Streamer Application's staff-DM step and `STAFF_DM_ON_NEW_TICKET`
+already rely on). A 60-second in-memory cooldown per member absorbs a
+double-click or a resubmit-mash; it does not persist across a restart, and
+does not need to.
 
 ## Data and backups
 

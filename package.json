@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "deploy": "node src/deploy-commands.js",
-    "check": "node --check src/index.js && node --check src/deploy-commands.js && node --check src/storage.js && node --check src/selftest.js && node --check src/guilds.js && node --check src/streamerApplications.js && node --check src/streamerApplications.offlinetest.js",
+    "check": "node --check src/index.js && node --check src/deploy-commands.js && node --check src/storage.js && node --check src/selftest.js && node --check src/guilds.js && node --check src/streamerApplications.js && node --check src/streamerApplications.offlinetest.js && node --check src/adminApplication.js",
     "audit": "npm audit --audit-level=moderate",
     "selftest": "node src/selftest.js",
     "guilds": "node src/guilds.js",
