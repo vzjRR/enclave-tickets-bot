@@ -905,6 +905,7 @@ const GUILD_MANAGER_COMMANDS = new Set([
   'ticket-section-add',
   'tickets-refresh',
   'streamer-setup',
+  'streamer-application-reset',
   'admin-application-setup'
 ]);
 
@@ -3097,6 +3098,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content: result.reused
             ? `Streamer Application panel refreshed in <#${result.channel.id}>.`
             : `Streamer Application panel published in <#${result.channel.id}>.`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'streamer-application-reset') {
+        const target = interaction.options.getUser('user', true);
+        const applicationId = streamerApplications.resetActiveApplication(interaction.guildId, target.id);
+        await interaction.reply({
+          content: applicationId
+            ? `Cleared <@${target.id}>'s in-progress application (${applicationId}). They can start a new one.`
+            : `<@${target.id}> has no in-progress application to clear.`,
+          flags: MessageFlags.Ephemeral
         });
         return;
       }

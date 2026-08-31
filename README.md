@@ -254,7 +254,7 @@ staff-only.
 | --- | --- |
 | `/quick-setup` | Manage Server |
 | `/setup`, `/ticket-panel`, `/ticket-section-add`, `/tickets-refresh` | Manage Server |
-| `/streamer-setup`, `/admin-application-setup` | Manage Server |
+| `/streamer-setup`, `/streamer-application-reset`, `/admin-application-setup` | Manage Server |
 | `/ticket-admin` | Manage Messages or Manage Channels in the ticket |
 | `/ticket-close` | Ticket staff, **or** the member who opened it |
 | `/ticket-add`, `/ticket-remove`, `/ticket-rename` | Ticket staff |
@@ -359,6 +359,16 @@ set, run **`/streamer-setup`** in whichever channel should host the panel;
 it posts one embed with a single **🎥 تقديم طلب** button, and running the
 command again edits that same message in place rather than posting a
 duplicate (wherever it currently lives, even a different channel).
+
+A member can only have one application in progress at a time
+(`findActiveApplicationForUser`): `IN_PROGRESS`, `PENDING_REVIEW`, or
+`NEEDS_INFO` all block starting a new one. Normally they clear this
+themselves with the review screen's Cancel button, but that only exists once
+they've reached review -- if their ticket channel gets deleted (manually, or
+a crash) while still mid-wizard, they're stuck with no way to start over.
+Staff can clear it with **`/streamer-application-reset user:<member>`**,
+which does the same thing that Cancel button does (marks the application
+`CANCELLED`), just reachable at any point in the flow.
 
 ## Panel banner images
 

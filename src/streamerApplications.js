@@ -292,6 +292,21 @@ function findActiveApplicationForUser(guildId, userId) {
   return Object.values(applications).find((app) => app.userId === userId && ACTIVE.has(app.status)) || null;
 }
 
+// Staff escape hatch for a member stuck unable to start a new application --
+// e.g. their ticket channel was deleted (manually, or a crash mid-wizard)
+// while their application was still IN_PROGRESS, so findActiveApplicationForUser
+// keeps blocking them even though there is no ticket left to continue in.
+// Same effect as the applicant's own Cancel button, just reachable by staff
+// without requiring the applicant to have reached the review screen first.
+function resetActiveApplication(guildId, userId) {
+  const active = findActiveApplicationForUser(guildId, userId);
+  if (!active) return null;
+
+  updateApplication(guildId, active.applicationId, (app) => ({ ...app, status: 'CANCELLED' }));
+  log(`Application ${active.applicationId} reset by staff for ${userId}`);
+  return active.applicationId;
+}
+
 function updateApplication(guildId, applicationId, mutator) {
   let result = null;
   updateGuildConfig(guildId, (config) => {
@@ -1387,6 +1402,7 @@ module.exports = {
   handleInteraction,
   isStreamerAppInteraction,
   findActiveApplicationForUser,
+  resetActiveApplication,
   getApplicationByChannel,
   // exported for tests
   QUESTIONS,

@@ -83,6 +83,14 @@ const commands = [
         .setDescription('Banner image to show instead of the written description (optional)')
     ),
   new SlashCommandBuilder()
+    .setName('streamer-application-reset')
+    .setDescription('Clear a member\'s in-progress Streamer Application so they can start a new one')
+    .setContexts(guildOnly)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addUserOption((option) =>
+      option.setName('user').setDescription('The member to reset').setRequired(true)
+    ),
+  new SlashCommandBuilder()
     .setName('admin-application-setup')
     .setDescription('Publish (or refresh) the standalone Admin Application panel in this channel')
     .setContexts(guildOnly)
