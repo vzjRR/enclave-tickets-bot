@@ -604,13 +604,19 @@ async function handlePanelApply(interaction) {
   }
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  // Override the ticket-welcome banner with this panel's own image (falls
+  // back to createTicket's support-panel default otherwise, which is wrong
+  // for this section -- a streamer application ticket should never show the
+  // support-ticket banner).
+  const welcomeImage = resolvePanelImageAttachment(config.streamerApplicationPanel?.imageFile);
   const result = await deps.createTicket({
     guild: interaction.guild,
     user: interaction.user,
     section: STREAMER_SECTION,
     reason: 'طلب انضمام كستريمر (Streamer Application)',
     config,
-    lang: 'ar'
+    lang: 'ar',
+    welcomeImage
   });
 
   if (!result) {
@@ -650,26 +656,10 @@ async function startApplication(channel, user, member = null) {
 
   saveApplication(channel.guild.id, application);
 
-  // Same banner the panel shows: the ticket-welcome message carries no text
-  // of its own -- just the image, with the actual first wizard question
-  // (renderStep, below) as the interactive part underneath it.
-  const config = getGuildConfig(channel.guild.id) || {};
-  const imageAttachment = resolvePanelImageAttachment(config.streamerApplicationPanel?.imageFile);
-  const welcome = imageAttachment
-    ? new EmbedBuilder().setColor(deps.BRAND_COLOR).setImage(`attachment://${imageAttachment.name}`)
-    : brandEmbed()
-        .setTitle('🎥 طلب انضمام كستريمر')
-        .setDescription(
-          `مرحباً <@${user.id}>!\n\n` +
-          'سيتكون هذا الطلب من عدة أقسام (7 مراحل). أجب على كل سؤال بالضغط على الزر الظاهر، ' +
-          'وسينتقل البوت تلقائياً للسؤال التالي دون الحاجة لترقيم إجاباتك.\n\n' +
-          `رقم الطلب: **${applicationId}**`
-        );
-  await channel.send({
-    embeds: [welcome],
-    files: imageAttachment ? [imageAttachment.attachment] : []
-  }).catch(() => {});
-
+  // No separate welcome message here: createTicket() already sent the
+  // panel's own banner (via handlePanelApply's welcomeImage override) as the
+  // ticket's pinned message, so the wizard's first question is the next
+  // thing the applicant should see.
   await renderStep(channel, application, { asUpdate: false });
   log(`Application ${applicationId} started by ${user.id} in guild ${channel.guild.id}`);
   return application;

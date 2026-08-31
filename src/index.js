@@ -2177,7 +2177,13 @@ async function notifyStaffOfNewTicket({ guild, section, channel, user, reason, t
   return { attempted: recipients.length, delivered, skipped: false };
 }
 
-async function createTicket({ guild, user, section, reason, config, lang = 'en' }) {
+// `welcomeImage` lets a caller override which banner the ticket-welcome
+// message shows -- the Streamer Application panel passes its own resolved
+// image here rather than letting this default to the support panel's,
+// which is otherwise correct for every ordinary support-ticket category.
+// Pass null explicitly for "resolved to nothing, don't fall back"; leave the
+// key out entirely to get the default support-panel resolution.
+async function createTicket({ guild, user, section, reason, config, lang = 'en', welcomeImage }) {
   const everyoneId = guild.roles.everyone.id;
 
   // Reserve the number under a per-guild lock. Read-increment-write without one
@@ -2254,12 +2260,12 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en' 
   // unconditionally regardless of which embed branch runs.
   const ui = t(lang);
 
-  // Same banner the panel shows: the ticket-welcome message carries no text
-  // of its own (no title, opener/category/reason fields, footer or
-  // timestamp) -- just the image and the Claim/Close/Admin Panel controls
-  // below it. Falls back to the old text layout only if the image asset is
-  // ever missing.
-  const imageAttachment = resolvePanelImageAttachment(config.panelImageFile);
+  // Same banner the section's own panel shows: the ticket-welcome message
+  // carries no text of its own (no title, opener/category/reason fields,
+  // footer or timestamp) -- just the image and the Claim/Close/Admin Panel
+  // controls below it. Falls back to the old text layout only if no image
+  // is available at all.
+  const imageAttachment = welcomeImage !== undefined ? welcomeImage : resolvePanelImageAttachment(config.panelImageFile);
   const embed = new EmbedBuilder().setColor(BRAND_COLOR);
 
   if (imageAttachment) {
