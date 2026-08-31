@@ -2249,6 +2249,10 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en' 
 
   const staffMentions = section.roleIds.map((roleId) => `<@&${roleId}>`).join(' ');
   const localSectionName = translateSectionName(section.name, lang);
+  // Used below both for the ticket-welcome embed's text fallback and for the
+  // member's "ticket created" DM confirmation, so it has to be declared
+  // unconditionally regardless of which embed branch runs.
+  const ui = t(lang);
 
   // Same banner the panel shows: the ticket-welcome message carries no text
   // of its own (no title, opener/category/reason fields, footer or
@@ -2261,7 +2265,6 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en' 
   if (imageAttachment) {
     embed.setImage(`attachment://${imageAttachment.name}`);
   } else {
-    const ui = t(lang);
     const openedAt = Math.floor(Date.now() / 1000);
     embed
       .setTitle(`${parseSectionEmoji(section.emoji)?.text || '🎫'} ${localSectionName}`)
