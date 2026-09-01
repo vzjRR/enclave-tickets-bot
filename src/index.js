@@ -2298,6 +2298,19 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en',
     allowedMentions: { parse: [], roles: section.roleIds, users: [user.id] }
   });
 
+  // The banner branch above carries no text of its own, but the member's own
+  // words are not decoration -- unlike the panel's marketing copy, nothing
+  // else in the channel repeats why they actually opened this ticket. The
+  // non-image fallback already includes it in the embed description above.
+  // Sections whose "reason" is a fixed placeholder rather than something the
+  // member actually typed (the Streamer Application ticket, whose real
+  // content is the wizard that follows) opt out via skipReasonMessage.
+  if (imageAttachment && reason && !section.skipReasonMessage) {
+    await channel.send({
+      embeds: [new EmbedBuilder().setColor(BRAND_COLOR).setDescription(reason.slice(0, 4000))]
+    }).catch(() => {});
+  }
+
   // Recorded so the controls stay findable even when pinning fails, and in
   // storage rather than the topic so it does not consume a channel edit.
   setTicketControlMessageId(guild.id, channel.id, pinned.id);

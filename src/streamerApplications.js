@@ -589,6 +589,10 @@ const STREAMER_SECTION = {
   name: 'Streamer Application',
   emoji: '🎥',
   categoryId: STREAMER_APPLICATION_CATEGORY_ID,
+  // The "reason" passed to createTicket is a fixed placeholder, not
+  // something the member actually typed -- their real content is the wizard
+  // that follows, so createTicket should not echo it as a channel message.
+  skipReasonMessage: true,
   get roleIds() {
     const staffRoleId = (process.env.STAFF_ROLE_ID || '').trim();
     return [...new Set([...STREAMER_REVIEW_ROLE_IDS, staffRoleId].filter(Boolean))];
