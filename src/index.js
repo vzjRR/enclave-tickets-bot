@@ -164,7 +164,10 @@ const SECTION_NAME_TRANSLATIONS = {
   'Ban Appeal': 'استئناف حظر',
   'Compensation': 'تعويض',
   'Store': 'المتجر',
-  'Streamer Application': 'طلب انضمام كستريمر'
+  'Streamer Application': 'طلب انضمام كستريمر',
+  'Police Headquarters': 'رئاسة الشرطة',
+  'Police Academy': 'أكاديمية الشرطة',
+  'Police Internal Affairs': 'الشؤون الداخلية للشرطة'
 };
 
 function translateSectionName(name, lang) {
@@ -2444,7 +2447,10 @@ const DEFAULT_SECTIONS = [
   { name: 'Reports', emoji: '🕵️' },
   { name: 'Ban Appeal', emoji: '⛔' },
   { name: 'Compensation', emoji: '💸' },
-  { name: 'Store', emoji: '💰' }
+  { name: 'Store', emoji: '💰' },
+  { name: 'Police Headquarters', emoji: '🏢' },
+  { name: 'Police Academy', emoji: '🎓' },
+  { name: 'Police Internal Affairs', emoji: '⚖️' }
 ];
 
 const STAFF_ROLE_NAME = 'Ticket Staff';

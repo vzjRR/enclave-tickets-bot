@@ -14,12 +14,15 @@ Support Center                 visible to everyone
   ├── #create-ticket           the panel
   └── #tickets-log             staff read-only, bot writes
 
-❓ Inquiries          invisible until it holds a ticket
-⚠️ Technical Issue    invisible
-🕵️ Reports            invisible
-⛔ Ban Appeal         invisible
-💸 Compensation       invisible
-💰 Store              invisible
+❓ Inquiries                 invisible until it holds a ticket
+⚠️ Technical Issue           invisible
+🕵️ Reports                   invisible
+⛔ Ban Appeal                invisible
+💸 Compensation              invisible
+💰 Store                     invisible
+🏢 Police Headquarters       invisible
+🎓 Police Academy            invisible
+⚖️ Police Internal Affairs   invisible
 ```
 
 ## Features
@@ -203,7 +206,8 @@ state lives in the channel topic (`owner=`, `status=`, `claimedBy=`,
 The panel's select menu is a language choice first ("Choose your language -
 اختر لغتك المفضلة"): English (🇬🇧) or العربية (🇴🇲). Picking one shows the
 category list again, in that language. Only the section names /quick-setup
-ships (Inquiries, Technical Issue, Reports, Ban Appeal, Compensation, Store)
+ships (Inquiries, Technical Issue, Reports, Ban Appeal, Compensation, Store,
+Police Headquarters, Police Academy, Police Internal Affairs)
 have a stored Arabic label; a section added later via `/ticket-section-add`
 shows the same name in both, since there is nowhere to store a translation
 for a custom name.
