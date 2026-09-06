@@ -2,13 +2,17 @@
 // Admin Application: the simplest of the three application panels -- one
 // button, a fixed set of questions, no ticket channel, no stored application
 // record. Discord caps a single modal at 5 fields, so the 7 questions split
-// across two modals shown back-to-back (Discord does allow responding to a
-// modal submission with another modal); submitting the second one DMs every
-// member holding one of the configured review roles with all 7 answers, and
-// that is the entire flow. Arabic-only by design. Dependencies (client,
-// storage, a couple of index.js helpers) are injected via init() rather than
-// required directly, so this file never creates a circular require with
-// index.js -- same pattern as streamerApplications.js.
+// across two modals -- but a modal submission cannot itself respond with
+// another modal (discord.js deliberately does not expose showModal on
+// ModalSubmitInteraction; this is not just a version gap, it reflects a real
+// Discord API restriction), so a button sits between them: modal 1 submits
+// to an ephemeral "Continue" button, which is a component interaction and
+// can show modal 2. Submitting modal 2 DMs every member holding one of the
+// configured review roles with all 7 answers, and that is the entire flow.
+// Arabic-only by design. Dependencies (client, storage, a couple of
+// index.js helpers) are injected via init() rather than required directly,
+// so this file never creates a circular require with index.js -- same
+// pattern as streamerApplications.js.
 // ---------------------------------------------------------------------------
 
 const {
@@ -229,6 +233,9 @@ async function handleInteraction(interaction) {
     if (interaction.isButton() && interaction.customId === 'admapp:panel:apply') {
       return await handleApplyButton(interaction);
     }
+    if (interaction.isButton() && interaction.customId === 'admapp:continue') {
+      return await handleContinueButton(interaction);
+    }
     if (interaction.isModalSubmit() && interaction.customId === 'admapp:modal1') {
       return await handleModal1Submit(interaction);
     }
@@ -287,6 +294,26 @@ async function handleApplyButton(interaction) {
 async function handleModal1Submit(interaction) {
   const answers = readAnswers(interaction, MODAL_1_QUESTIONS);
   pendingAnswers.set(interaction.user.id, { answers, savedAt: Date.now() });
+
+  // A modal submission cannot itself show another modal -- only a button
+  // (or other component) interaction can, so hand off to one here.
+  await interaction.reply({
+    content: 'بقي سؤالان أخيران.',
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('admapp:continue').setLabel('متابعة').setStyle(ButtonStyle.Primary)
+      )
+    ],
+    flags: MessageFlags.Ephemeral
+  });
+  return true;
+}
+
+async function handleContinueButton(interaction) {
+  if (!pendingAnswers.has(interaction.user.id)) {
+    await ephemeralError(interaction, 'انتهت صلاحية الجزء الأول من الطلب. اضغط زر التقديم وابدأ من جديد.');
+    return true;
+  }
 
   await interaction.showModal(buildQuestionModal('admapp:modal2', 'طلب تقديم للإدارة (٢/٢)', MODAL_2_QUESTIONS));
   return true;
