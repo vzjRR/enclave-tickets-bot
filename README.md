@@ -434,12 +434,19 @@ this module; it does not replace clicking through the flow in Discord.
 
 The simplest of the three application panels (`src/adminApplication.js`,
 same self-contained/injected-dependencies shape as `streamerApplications.js`):
-one button, one modal, one free-text field, Arabic-only. There is no ticket
-channel, no wizard, and no stored application record — clicking **📋 طلب
-تقديم للإدارة** opens a modal with a single paragraph field, and submitting it
-DMs every member holding a role in `ADMIN_APPLICATION_REVIEW_ROLE_ID`
-(comma-separated for more than one) with the applicant and their text. That
-DM step is the entire flow.
+one button, a fixed set of 7 questions, Arabic-only. There is no ticket
+channel and no stored application record — clicking **📋 طلب تقديم للإدارة**
+opens a modal with the first 5 questions; submitting it immediately opens a
+second modal with the remaining 2 (Discord caps a single modal at 5 fields,
+and does allow responding to a modal submission with another modal).
+Submitting that second modal DMs every member holding a role in
+`ADMIN_APPLICATION_REVIEW_ROLE_ID` (comma-separated for more than one) with
+all 7 answers. That DM step is the entire flow; the questions themselves are
+the `QUESTIONS` array at the top of `src/adminApplication.js`.
+
+The gap between the two modals is bridged by a short-lived in-memory map
+(10-minute TTL), not storage — a bot restart between them loses the first
+5 answers, same as any other mid-flow state this feature keeps.
 
 Set `ADMIN_APPLICATION_REVIEW_ROLE_ID` to enable it — with that unset,
 `/admin-application-setup` refuses to run. It also needs

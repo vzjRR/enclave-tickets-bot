@@ -1,12 +1,14 @@
 // ---------------------------------------------------------------------------
 // Admin Application: the simplest of the three application panels -- one
-// button, one modal, one free-text field. No ticket channel, no wizard, no
-// stored application record: submitting DMs every member holding one of the
-// configured review roles, and that is the entire flow. Arabic-only by
-// design. Dependencies (client, storage, a couple of index.js helpers) are
-// injected via init() rather than required directly, so this file never
-// creates a circular require with index.js -- same pattern as
-// streamerApplications.js.
+// button, a fixed set of questions, no ticket channel, no stored application
+// record. Discord caps a single modal at 5 fields, so the 7 questions split
+// across two modals shown back-to-back (Discord does allow responding to a
+// modal submission with another modal); submitting the second one DMs every
+// member holding one of the configured review roles with all 7 answers, and
+// that is the entire flow. Arabic-only by design. Dependencies (client,
+// storage, a couple of index.js helpers) are injected via init() rather than
+// required directly, so this file never creates a circular require with
+// index.js -- same pattern as streamerApplications.js.
 // ---------------------------------------------------------------------------
 
 const {
@@ -27,6 +29,30 @@ const path = require('node:path');
 const { DATA_DIR, getGuildConfig } = require('./storage');
 
 const APPLY_BUTTON_LABEL = '📋 طلب تقديم للإدارة';
+
+// Fixed question set -- split 5/2 across two modals to stay under Discord's
+// 5-field-per-modal cap. Order here is the order asked and the order shown
+// in the final review embed.
+const QUESTIONS = [
+  { id: 'name', label: 'الاسم؟', style: TextInputStyle.Short, maxLength: 100 },
+  { id: 'age', label: 'كم عمرك؟', style: TextInputStyle.Short, maxLength: 20 },
+  { id: 'memberSince', label: 'من متى وأنت في سيرفر Enclave؟', style: TextInputStyle.Short, maxLength: 100 },
+  { id: 'reason', label: 'ليش حاب تقدم على إدارة Enclave؟', style: TextInputStyle.Paragraph, maxLength: 1000 },
+  { id: 'experience', label: 'هل عندك خبرة إدارية سابقة؟', style: TextInputStyle.Paragraph, maxLength: 1000 },
+  { id: 'hours', label: 'كم ساعة تقدر تتواجد يوميًا؟', style: TextInputStyle.Short, maxLength: 50 },
+  { id: 'contribution', label: 'وش تقدر تضيف لإدارة Enclave؟', style: TextInputStyle.Paragraph, maxLength: 1000 }
+];
+const MODAL_1_QUESTIONS = QUESTIONS.slice(0, 5);
+const MODAL_2_QUESTIONS = QUESTIONS.slice(5);
+
+// Bridges the two modals: modal 1's answers wait here for modal 2's
+// submission to complete the set. In-memory only -- a bot restart between
+// the two modals loses the first answers, same as any other mid-flow state
+// this feature keeps (there's no ticket or stored record to resume from
+// either), so a short TTL just guards against a genuinely abandoned modal 1
+// rather than a real restart.
+const PENDING_TTL_MS = 10 * 60 * 1000;
+const pendingAnswers = new Map();
 
 // Comma-separated so more than one team can receive applications (e.g.
 // ADMIN_APPLICATION_REVIEW_ROLE_ID=111,222).
@@ -203,8 +229,11 @@ async function handleInteraction(interaction) {
     if (interaction.isButton() && interaction.customId === 'admapp:panel:apply') {
       return await handleApplyButton(interaction);
     }
-    if (interaction.isModalSubmit() && interaction.customId === 'admapp:modal') {
-      return await handleModalSubmit(interaction);
+    if (interaction.isModalSubmit() && interaction.customId === 'admapp:modal1') {
+      return await handleModal1Submit(interaction);
+    }
+    if (interaction.isModalSubmit() && interaction.customId === 'admapp:modal2') {
+      return await handleModal2Submit(interaction);
     }
   } catch (error) {
     logError(`Unhandled error for ${interaction.customId}:`, error);
@@ -219,41 +248,66 @@ function isOnCooldown(userId) {
   return Boolean(last && Date.now() - last < SUBMIT_COOLDOWN_MS);
 }
 
+function buildQuestionModal(customId, title, questions) {
+  return new ModalBuilder()
+    .setCustomId(customId)
+    .setTitle(title)
+    .addComponents(
+      ...questions.map((q) =>
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId(q.id)
+            .setLabel(q.label)
+            .setStyle(q.style)
+            .setRequired(true)
+            .setMaxLength(q.maxLength)
+        )
+      )
+    );
+}
+
+function readAnswers(interaction, questions) {
+  const answers = {};
+  for (const q of questions) {
+    answers[q.id] = interaction.fields.getTextInputValue(q.id).trim();
+  }
+  return answers;
+}
+
 async function handleApplyButton(interaction) {
   if (isOnCooldown(interaction.user.id)) {
     await ephemeralError(interaction, 'يرجى الانتظار قليلاً قبل إرسال طلب آخر.');
     return true;
   }
 
-  const modal = new ModalBuilder()
-    .setCustomId('admapp:modal')
-    .setTitle('طلب تقديم للإدارة')
-    .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('request')
-          .setLabel('اكتب طلبك هنا')
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(true)
-          .setMaxLength(4000)
-      )
-    );
-
-  await interaction.showModal(modal);
+  await interaction.showModal(buildQuestionModal('admapp:modal1', 'طلب تقديم للإدارة (١/٢)', MODAL_1_QUESTIONS));
   return true;
 }
 
-async function handleModalSubmit(interaction) {
+async function handleModal1Submit(interaction) {
+  const answers = readAnswers(interaction, MODAL_1_QUESTIONS);
+  pendingAnswers.set(interaction.user.id, { answers, savedAt: Date.now() });
+
+  await interaction.showModal(buildQuestionModal('admapp:modal2', 'طلب تقديم للإدارة (٢/٢)', MODAL_2_QUESTIONS));
+  return true;
+}
+
+async function handleModal2Submit(interaction) {
+  const pending = pendingAnswers.get(interaction.user.id);
+  if (!pending || Date.now() - pending.savedAt > PENDING_TTL_MS) {
+    pendingAnswers.delete(interaction.user.id);
+    await ephemeralError(interaction, 'انتهت صلاحية الجزء الأول من الطلب. اضغط الزر وابدأ من جديد.');
+    return true;
+  }
+
   if (isOnCooldown(interaction.user.id)) {
+    pendingAnswers.delete(interaction.user.id);
     await ephemeralError(interaction, 'يرجى الانتظار قليلاً قبل إرسال طلب آخر.');
     return true;
   }
 
-  const text = interaction.fields.getTextInputValue('request').trim();
-  if (!text) {
-    await ephemeralError(interaction, 'لا يمكن إرسال طلب فارغ.');
-    return true;
-  }
+  const answers = { ...pending.answers, ...readAnswers(interaction, MODAL_2_QUESTIONS) };
+  pendingAnswers.delete(interaction.user.id);
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   recentSubmissions.set(interaction.user.id, Date.now());
@@ -261,7 +315,7 @@ async function handleModalSubmit(interaction) {
   const embed = new EmbedBuilder()
     .setColor(deps.BRAND_COLOR)
     .setTitle('📋 طلب تقديم للإدارة')
-    .setDescription(text.slice(0, 4000))
+    .addFields(QUESTIONS.map((q) => ({ name: q.label, value: answers[q.id].slice(0, 1024) || '-' })))
     .addFields({ name: 'المتقدم', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: false })
     .setFooter({ text: deps.BRAND_FOOTER })
     .setTimestamp();
