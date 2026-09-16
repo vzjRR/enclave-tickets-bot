@@ -196,12 +196,18 @@ the panel message was deleted, run `/quick-setup` to repost it.
    closes automatically.
 6. On **Close**, the archive is written to the log, the member is DMed a
    "Ticket Closed" card with their transcript attached, and the channel is
-   moved to the **Expired Tickets** category. The pinned controls switch to
-   **Reopen** and **Admin Panel**.
-7. Whoever closed it can hit **Reopen** within `TICKET_EXPIRE_WINDOW_MINUTES`
-   to move it back to its original category and reopen it exactly as it was.
-   Once that window passes, the maintenance sweep deletes the channel for
-   good — the log archive and the member's DMed transcript are untouched
+   moved to the **Expired Tickets** category. The pinned control message
+   keeps only **Admin Panel** (Claim/Close are gone); a separate "Ticket
+   closed" notice is sent below it, carrying a **Reopen** button of its own —
+   so Reopen shows up after the close notice, not above it.
+7. Whoever closed it can hit that **Reopen** button within
+   `TICKET_EXPIRE_WINDOW_MINUTES` to move it back to its original category and
+   reopen it exactly as it was. **A ticket can only ever be reopened once** —
+   the button is consumed on click, and if it is closed again afterward, no
+   Reopen button is offered and the reopen click is refused even if the old
+   button is somehow still visible. Once the window passes (or the ticket has
+   already used its one reopen), the maintenance sweep deletes the channel
+   for good — the log archive and the member's DMed transcript are untouched
    either way.
 
 One open ticket per member, and at most `TICKET_DAILY_LIMIT` new tickets per

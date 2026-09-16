@@ -1019,25 +1019,49 @@ function formatExpireWindow() {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
-function buildTicketClosedNoticeEmbed(closedById) {
+// alreadyReopened is true once this ticket has used up its one reopen, so the
+// notice stops advertising an action that will just be refused.
+function buildTicketClosedNoticeEmbed(closedById, alreadyReopened = false) {
   return new EmbedBuilder()
     .setColor(0xffff00)
     .setTitle('Ticket closed')
     .setDescription(
       `Closed by <@${closedById}>.\n\n` +
-      `Moved to **${EXPIRED_CATEGORY_NAME}**. <@${closedById}> can reopen it within ${formatExpireWindow()}; ` +
-      'after that it will be permanently deleted.'
+      (alreadyReopened
+        ? `Moved to **${EXPIRED_CATEGORY_NAME}**. This ticket was already reopened once, so it cannot be ` +
+          'reopened again -- it will be permanently deleted shortly.'
+        : `Moved to **${EXPIRED_CATEGORY_NAME}**. <@${closedById}> can reopen it below within ` +
+          `${formatExpireWindow()}; after that it will be permanently deleted.`)
     );
+}
+
+// Lives on the "Ticket closed" notice itself, not the pinned control message,
+// so it appears after the close notice in the channel rather than above it.
+function buildTicketReopenControls() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('ticket:reopen')
+        .setLabel('Reopen')
+        .setStyle(ButtonStyle.Success)
+    )
+  ];
+}
+
+// Shared by every close path (button, slash command, auto-close on no
+// reply) so the "already used its one reopen" check only lives in one place.
+async function sendTicketClosedNotice(channel, closedById) {
+  const alreadyReopened = Boolean(getTicketStateEntry(channel)?.reopened);
+  await channel.send({
+    embeds: [buildTicketClosedNoticeEmbed(closedById, alreadyReopened)],
+    components: alreadyReopened ? [] : buildTicketReopenControls()
+  }).catch(() => {});
 }
 
 function buildTicketControls(status = 'open', claimedBy = null) {
   if (status === 'closed') {
     return [
       new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId('ticket:reopen')
-          .setLabel('Reopen')
-          .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
           .setCustomId('ticket:admin-panel')
           .setLabel('Admin Panel')
@@ -1156,6 +1180,7 @@ async function refreshTicketChannel(channel) {
         );
         await closeAndArchiveTicket(channel, client.user.id);
         await tryUpdatePinnedTicketControls(channel, 'closed');
+        await sendTicketClosedNotice(channel, client.user.id);
         return { channelId: channel.id, controlsUpdated: false, status: 'closed', autoClosed: true };
       }
     }
@@ -3296,10 +3321,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const result = await closeAndArchiveTicket(channel, interaction.user.id);
         await tryUpdatePinnedTicketControls(channel, 'closed');
-
-        await channel
-          .send({ embeds: [buildTicketClosedNoticeEmbed(interaction.user.id)] })
-          .catch(() => {});
+        await sendTicketClosedNotice(channel, interaction.user.id);
 
         await interaction.editReply({
           content: result.logged.ok
@@ -3533,13 +3555,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        // Reopen is checked separately from the staff-only gate below: whoever
-        // closed the ticket can reopen it even if that was the ticket owner
-        // closing their own ticket via /ticket-close, not a staff member.
+        // Reopen is checked separately from the staff-only gate below: it is
+        // granted to whoever closed the ticket specifically, not to staff in
+        // general (canManageTicket/hasGuildManagerPermission are only an
+        // emergency override if that person is unavailable).
         if (interaction.customId === 'ticket:reopen') {
           const state = getTicketStateEntry(interaction.channel);
           if (state?.status !== 'closed') {
             await interaction.reply({ content: 'This ticket is not closed.', flags: MessageFlags.Ephemeral });
+            return;
+          }
+
+          if (state.reopened) {
+            await interaction.reply({
+              content: 'This ticket has already used its one-time reopen and cannot be reopened again.',
+              flags: MessageFlags.Ephemeral
+            });
             return;
           }
 
@@ -3563,11 +3594,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.deferUpdate();
           const channel = await fetchFreshTicketChannel(interaction);
 
+          // reopened is a one-way flag: once set, this ticket can never be
+          // reopened again, even after a later close.
           await setTicketState(channel, {
             status: 'open',
             closedBy: null,
             closedAt: null,
-            expiresAt: null
+            expiresAt: null,
+            reopened: true
           });
           setTicketClosedState(channel.guild.id, channel.id, false);
 
@@ -3579,6 +3613,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           await tryUpdatePinnedTicketControls(channel, 'open', state.claimedBy || null);
+
+          // The button just used lived on the close notice, not the pinned
+          // controls -- clear it so it cannot be clicked a second time.
+          await interaction.message.edit({ components: [] }).catch(() => {});
 
           await channel.send({
             embeds: [
@@ -3680,12 +3718,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .edit({ components: buildTicketBusyControls('Closing...') })
             .catch(() => {});
 
-          const result = await closeAndArchiveTicket(channel, interaction.user.id);
+          await closeAndArchiveTicket(channel, interaction.user.id);
           await tryUpdatePinnedTicketControls(channel, 'closed');
-
-          await channel
-            .send({ embeds: [buildTicketClosedNoticeEmbed(interaction.user.id)] })
-            .catch(() => {});
+          await sendTicketClosedNotice(channel, interaction.user.id);
           return;
         }
 
