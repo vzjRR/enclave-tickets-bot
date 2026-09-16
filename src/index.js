@@ -313,9 +313,14 @@ async function resolveConfiguredRole(guild) {
   return role;
 }
 
-// Grace period between announcing a close and destroying the channel, so the
-// people in it can see why it vanished.
-const TICKET_DELETE_DELAY_MS = 10_000;
+// How long a closed ticket stays parked in the Expired Tickets category
+// (visible, but only reopenable by whoever closed it) before it is permanently
+// deleted. Checked on the same maintenance sweep as everything else, so the
+// real deadline can slip by up to TICKET_REFRESH_INTERVAL_MINUTES.
+const TICKET_EXPIRE_WINDOW_MS = Math.max(
+  1,
+  Number.parseInt(process.env.TICKET_EXPIRE_WINDOW_MINUTES || '60', 10) || 60
+) * 60_000;
 
 const setupSessions = new Map();
 const ticketCreationLocks = new Set();
@@ -1005,9 +1010,41 @@ async function setTicketInfo(channel, info) {
   await setTicketState(channel, { info: cleanInfo });
 }
 
+function formatExpireWindow() {
+  const minutes = Math.round(TICKET_EXPIRE_WINDOW_MS / 60_000);
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+function buildTicketClosedNoticeEmbed(closedById) {
+  return new EmbedBuilder()
+    .setColor(0xffff00)
+    .setTitle('Ticket closed')
+    .setDescription(
+      `Closed by <@${closedById}>.\n\n` +
+      `Moved to **${EXPIRED_CATEGORY_NAME}**. <@${closedById}> can reopen it within ${formatExpireWindow()}; ` +
+      'after that it will be permanently deleted.'
+    );
+}
+
 function buildTicketControls(status = 'open', claimedBy = null) {
-  const isClosed = status === 'closed';
-  const closeLabel = 'Close & Delete';
+  if (status === 'closed') {
+    return [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('ticket:reopen')
+          .setLabel('Reopen')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('ticket:admin-panel')
+          .setLabel('Admin Panel')
+          .setStyle(ButtonStyle.Secondary)
+      )
+    ];
+  }
 
   return [
     new ActionRowBuilder().addComponents(
@@ -1015,12 +1052,11 @@ function buildTicketControls(status = 'open', claimedBy = null) {
         .setCustomId('ticket:claim')
         .setLabel(claimedBy ? 'Claimed' : 'Claim')
         .setStyle(ButtonStyle.Primary)
-        .setDisabled(Boolean(claimedBy) || isClosed),
+        .setDisabled(Boolean(claimedBy)),
       new ButtonBuilder()
         .setCustomId('ticket:close')
-        .setLabel(closeLabel)
-        .setStyle(ButtonStyle.Danger)
-        .setDisabled(isClosed),
+        .setLabel('Close Ticket')
+        .setStyle(ButtonStyle.Danger),
       new ButtonBuilder()
         .setCustomId('ticket:admin-panel')
         .setLabel('Admin Panel')
@@ -1074,15 +1110,42 @@ async function tryUpdatePinnedTicketControls(channel, status, claimedBy = null) 
   }
 }
 
+// Final step of the close/expire lifecycle: the reopen window is over, so the
+// channel is gone for good. Log archive and DM already happened at close time
+// and are untouched by this.
+async function deleteExpiredTicket(channel) {
+  const ticketNumber = getTicketNumber(channel) || 'unknown';
+  clearTicketState(channel.guild.id, channel.id);
+  setTicketClosedState(channel.guild.id, channel.id, false);
+  console.log(`Deleting expired ticket ${channel.id} (#${ticketNumber}): its reopen window has passed.`);
+  await channel.delete(`Ticket #${ticketNumber} expired after its reopen window`).catch((error) => {
+    console.error(`Failed to delete expired ticket channel ${channel.id}:`, error?.message || error);
+  });
+}
+
 async function refreshTicketChannel(channel) {
   await migrateLegacyTicketTopicIfNeeded(channel);
 
-  const status = getTicketStatus(channel) === 'closed' || channel.name.startsWith('closed-')
+  const stateEntry = getTicketStateEntry(channel);
+  const status = stateEntry?.status === 'closed' || channel.name.startsWith('closed-')
     ? 'closed'
     : 'open';
+
+  if (status === 'closed') {
+    const expiresAt = Number(stateEntry?.expiresAt) || null;
+    if (expiresAt && Date.now() >= expiresAt) {
+      await deleteExpiredTicket(channel);
+      return { channelId: channel.id, controlsUpdated: false, status: 'deleted' };
+    }
+
+    const controlMessage = await tryUpdatePinnedTicketControls(channel, 'closed');
+    await trySetTicketTopicValue(channel, 'status', 'closed');
+    return { channelId: channel.id, controlsUpdated: Boolean(controlMessage), status };
+  }
+
   const claimedBy = getTicketClaimedBy(channel);
 
-  if (status === 'open' && claimedBy) {
+  if (claimedBy) {
     const claimedAt = getTicketClaimedAt(channel);
     if (claimedAt) {
       const lastActivity = await resolveTicketOwnerActivity(channel, claimedAt);
@@ -1092,6 +1155,7 @@ async function refreshTicketChannel(channel) {
           `${formatDuration(Date.now() - lastActivity)} since it was claimed.`
         );
         await closeAndArchiveTicket(channel, client.user.id);
+        await tryUpdatePinnedTicketControls(channel, 'closed');
         return { channelId: channel.id, controlsUpdated: false, status: 'closed', autoClosed: true };
       }
     }
@@ -2060,28 +2124,49 @@ async function closeAndArchiveTicket(channel, closedById) {
     }, 'ticket closed notice');
   }
 
-  // Drop any queued rename for this channel; it is about to stop existing.
+  // Drop any queued rename for this channel; a ticket that just left the
+  // active lifecycle should not have a stale rename fire on it later.
   const pending = pendingChannelRenames.get(channel.id);
   if (pending?.timer) clearTimeout(pending.timer);
   pendingChannelRenames.delete(channel.id);
   clearPendingTicketRename(channel.guild.id, channel.id);
-  clearTicketControlMessageId(channel.guild.id, channel.id);
-  clearTicketState(channel.guild.id, channel.id);
-  setTicketClosedState(channel.guild.id, channel.id, false);
   ticketOwnerActivity.delete(channel.id);
+
+  // The channel is kept (not deleted) for a reopen window: state is updated
+  // rather than cleared, so getTicketOwnerId/getTicketClaimedBy etc. still
+  // work if this is reopened, and originalCategoryId lets a reopen put it
+  // back where it came from. clearTicketState only runs once the window
+  // actually expires (see deleteExpiredTicket).
+  const expiresAt = Date.now() + TICKET_EXPIRE_WINDOW_MS;
+  await setTicketState(channel, {
+    status: 'closed',
+    closedBy: closedById,
+    closedAt: Date.now(),
+    expiresAt,
+    originalCategoryId: channel.parentId || null
+  });
+  setTicketClosedState(channel.guild.id, channel.id, true);
+
+  const expiredCategory = await ensureExpiredCategory(channel.guild).catch((error) => {
+    console.error(
+      `Failed to prepare the ${EXPIRED_CATEGORY_NAME} category for ${channel.guild.id}:`,
+      error?.message || error
+    );
+    return null;
+  });
+
+  if (expiredCategory && channel.parentId !== expiredCategory.id) {
+    await channel.setParent(expiredCategory.id, { lockPermissions: false }).catch((error) => {
+      console.error(`Failed to move ticket ${channel.id} to ${EXPIRED_CATEGORY_NAME}:`, error?.message || error);
+    });
+  }
 
   console.log(
     `Ticket ${ticketNumber} closed by ${closedById}; archived=${logged.ok} ` +
-    `messages=${logged.messageCount}; deleting channel ${channel.id}`
+    `messages=${logged.messageCount}; moved to ${EXPIRED_CATEGORY_NAME}, expires ${new Date(expiresAt).toISOString()}`
   );
 
-  setTimeout(() => {
-    channel.delete(`Ticket #${ticketNumber} closed by ${closedById}`).catch((error) => {
-      console.error(`Failed to delete ticket channel ${channel.id}:`, error?.message || error);
-    });
-  }, TICKET_DELETE_DELAY_MS);
-
-  return { ok: true, ticketNumber, logged };
+  return { ok: true, ticketNumber, logged, expiresAt };
 }
 
 // Creates the ticket channel, announces it, pins the controls and (on the
@@ -2226,12 +2311,17 @@ async function createTicket({ guild, user, section, reason, config, lang = 'en',
   for (const roleId of section.roleIds) {
     permissionOverwrites.push({
       id: roleId,
+      // Staff can see and read a fresh ticket, and (via Manage Messages) use its
+      // Claim button, but cannot post until one of them actually claims it --
+      // that is the whole point of claiming. SendMessages is granted back to
+      // the claimer individually the moment they claim (see the ticket:claim
+      // handler), and to anyone else added afterwards through the admin panel.
       allow: [
         PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
         PermissionFlagsBits.ReadMessageHistory,
         PermissionFlagsBits.ManageMessages
-      ]
+      ],
+      deny: [PermissionFlagsBits.SendMessages]
     });
   }
 
@@ -2452,6 +2542,7 @@ const TICKET_CATEGORY_NAME = '🎫 TICKETS';
 const SUPPORT_CATEGORY_NAME = 'Support Center';
 const PANEL_CHANNEL_NAME = 'create-ticket';
 const LOG_CHANNEL_NAME = 'tickets-log';
+const EXPIRED_CATEGORY_NAME = 'Expired Tickets';
 
 const REQUIRED_BOT_PERMISSIONS = [
   ['Manage Channels', PermissionFlagsBits.ManageChannels],
@@ -2568,6 +2659,24 @@ async function ensureTicketCategory(guild, name, created) {
 
   created.categories.push(name);
   return category;
+}
+
+// Holding area for closed tickets during their reopen window. Hidden the same
+// way an ordinary ticket category is -- the category itself carries no staff
+// overwrite, so it only becomes visible through each ticket channel's own
+// per-channel access, and disappears again once the last one in it is deleted.
+async function ensureExpiredCategory(guild) {
+  const existing = guild.channels.cache.find(
+    (channel) => channel?.type === ChannelType.GuildCategory && channel.name === EXPIRED_CATEGORY_NAME
+  );
+  if (existing) return existing;
+
+  return guild.channels.create({
+    name: EXPIRED_CATEGORY_NAME,
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: hiddenCategoryOverwrites(guild),
+    reason: `${BRAND_NAME} tickets: expired ticket holding area`
+  });
 }
 
 // What the bot must be able to do in a channel it was handed.
@@ -3188,19 +3297,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const channel = await fetchFreshTicketChannel(interaction);
 
         const result = await closeAndArchiveTicket(channel, interaction.user.id);
+        await tryUpdatePinnedTicketControls(channel, 'closed');
 
         await channel
-          .send({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0xffff00)
-                .setTitle('Ticket closed')
-                .setDescription(
-                  `Closed by <@${interaction.user.id}>.\n\n` +
-                  `This channel will be deleted in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds.`
-                )
-            ]
-          })
+          .send({ embeds: [buildTicketClosedNoticeEmbed(interaction.user.id)] })
           .catch(() => {});
 
         await interaction.editReply({
@@ -3208,10 +3308,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // the bot's own setup, not something the ticket owner needs to see --
           // it stays staff-only (it is already console.error'd for the log too).
           content: !canManage
-            ? `Ticket #${result.ticketNumber} is being deleted. The channel will disappear shortly.`
+            ? `Ticket #${result.ticketNumber} closed and moved to ${EXPIRED_CATEGORY_NAME}.`
             : result.logged.ok
-              ? `Ticket #${result.ticketNumber} archived to the log channel. The channel will be deleted shortly.`
-              : `Ticket #${result.ticketNumber} is being deleted, but no log channel is configured so nothing was archived. Run /quick-setup.`
+              ? `Ticket #${result.ticketNumber} archived to the log channel and moved to ${EXPIRED_CATEGORY_NAME}. ` +
+                `You can reopen it within ${formatExpireWindow()}.`
+              : `Ticket #${result.ticketNumber} closed, but no log channel is configured so nothing was archived. Run /quick-setup.`
         });
         return;
       }
@@ -3439,6 +3540,63 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
+        // Reopen is checked separately from the staff-only gate below: whoever
+        // closed the ticket can reopen it even if that was the ticket owner
+        // closing their own ticket via /ticket-close, not a staff member.
+        if (interaction.customId === 'ticket:reopen') {
+          const state = getTicketStateEntry(interaction.channel);
+          if (state?.status !== 'closed') {
+            await interaction.reply({ content: 'This ticket is not closed.', flags: MessageFlags.Ephemeral });
+            return;
+          }
+
+          const canManage = await canManageTicket(interaction);
+          if (state.closedBy !== interaction.user.id && !canManage && !hasGuildManagerPermission(interaction)) {
+            await interaction.reply({
+              content: `Only <@${state.closedBy}> (who closed this ticket) or staff can reopen it.`,
+              flags: MessageFlags.Ephemeral
+            });
+            return;
+          }
+
+          if (state.expiresAt && Date.now() >= Number(state.expiresAt)) {
+            await interaction.reply({
+              content: 'The reopen window for this ticket has passed.',
+              flags: MessageFlags.Ephemeral
+            });
+            return;
+          }
+
+          await interaction.deferUpdate();
+          const channel = await fetchFreshTicketChannel(interaction);
+
+          await setTicketState(channel, {
+            status: 'open',
+            closedBy: null,
+            closedAt: null,
+            expiresAt: null
+          });
+          setTicketClosedState(channel.guild.id, channel.id, false);
+
+          const originalCategoryId = state.originalCategoryId;
+          if (originalCategoryId && channel.parentId !== originalCategoryId) {
+            await channel.setParent(originalCategoryId, { lockPermissions: false }).catch((error) => {
+              console.error(`Failed to move reopened ticket ${channel.id} back:`, error?.message || error);
+            });
+          }
+
+          await tryUpdatePinnedTicketControls(channel, 'open', state.claimedBy || null);
+
+          await channel.send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0x2ecc71)
+                .setDescription(`Reopened by <@${interaction.user.id}>.`)
+            ]
+          }).catch(() => {});
+          return;
+        }
+
         if (!(await canManageTicket(interaction))) {
           await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
           return;
@@ -3464,6 +3622,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
             { claimedBy: interaction.user.id, claimedAt },
             'claim state'
           );
+          // The claimer is the only staff member who can write here until they
+          // add someone else through the admin panel -- the rest of the staff
+          // role was denied SendMessages when the ticket was created.
+          await editPermissionOverwrite(interaction.channel, interaction.user.id, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+          }, `Ticket claim by ${interaction.user.id}`).catch((error) => {
+            console.error(`Failed to grant claim access in ${interaction.channel.id}:`, error?.message || error);
+          });
           // The response clock starts now, not at the owner's last message
           // before the claim -- staff have only just picked it up.
           ticketOwnerActivity.set(interaction.channel.id, claimedAt);
@@ -3520,19 +3688,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .catch(() => {});
 
           const result = await closeAndArchiveTicket(channel, interaction.user.id);
+          await tryUpdatePinnedTicketControls(channel, 'closed');
 
           await channel
-            .send({
-              embeds: [
-                new EmbedBuilder()
-                  .setColor(0xffff00)
-                  .setTitle('Ticket closed')
-                  .setDescription(
-                    `Closed by <@${interaction.user.id}>.\n\n` +
-                    `This channel will be deleted in ${Math.round(TICKET_DELETE_DELAY_MS / 1000)} seconds.`
-                  )
-              ]
-            })
+            .send({ embeds: [buildTicketClosedNoticeEmbed(interaction.user.id)] })
             .catch(() => {});
           return;
         }
@@ -3739,7 +3898,12 @@ module.exports = {
   missingOptionalBotPermissions,
   updatePinnedTicketControls,
   getGuildConfig,
-  TICKET_DELETE_DELAY_MS,
+  TICKET_EXPIRE_WINDOW_MS,
+  EXPIRED_CATEGORY_NAME,
+  ensureExpiredCategory,
+  getTicketStateEntry,
+  getTicketStatus,
+  refreshTicketChannel,
   SUPPORT_CATEGORY_NAME,
   LOG_CHANNEL_NAME,
   DEFAULT_SECTIONS,

@@ -19,8 +19,11 @@ const {
   getTicketOwnerId,
   getTicketNumber,
   trySetTicketTopicValue,
+  trySetTicketTopicValues,
   getGuildConfig,
-  TICKET_DELETE_DELAY_MS,
+  EXPIRED_CATEGORY_NAME,
+  getTicketStateEntry,
+  refreshTicketChannel,
   SUPPORT_CATEGORY_NAME,
   LOG_CHANNEL_NAME,
   DEFAULT_SECTIONS
@@ -204,15 +207,31 @@ async function run() {
   check('someone who cannot see the log gets the panel link instead',
     outsiderRow?.toJSON()?.components?.[0]?.label === 'Open a New Ticket');
 
-  console.log(`        waiting ${TICKET_DELETE_DELAY_MS / 1000}s for the scheduled deletion...`);
-  check('ticket channel was deleted on close',
-    await waitFor('channel deletion', async () => {
+  check('ticket was moved to Expired Tickets instead of being deleted immediately',
+    await waitFor('move to Expired Tickets', async () => {
       const still = await guild.channels.fetch(channel.id).catch(() => null);
-      return still === null;
-    }, TICKET_DELETE_DELAY_MS + 20_000, 2_000));
+      return still !== null && still.parent?.name === EXPIRED_CATEGORY_NAME;
+    }, 15_000, 1_000));
+
+  const closedChannel = await guild.channels.fetch(channel.id, { force: true });
+  const closedState = getTicketStateEntry(closedChannel);
+  check('closed ticket state records status/closedBy/expiresAt',
+    closedState?.status === 'closed' &&
+    closedState?.closedBy === client.user.id &&
+    Number(closedState?.expiresAt) > Date.now());
 
   check('a closed ticket no longer blocks a new one',
     await bot.findExistingMemberTicket(guild, owner.id, getGuildConfig(guild.id)) === null);
+
+  // Force the reopen window into the past instead of waiting out the real
+  // expiry window, then drive the same per-channel check the maintenance
+  // sweep runs and confirm it deletes the channel.
+  await trySetTicketTopicValues(closedChannel, { expiresAt: Date.now() - 1_000 }, 'test: force expiry');
+  const expiringChannel = await guild.channels.fetch(channel.id, { force: true });
+  const expireResult = await refreshTicketChannel(expiringChannel);
+  check('an expired ticket is deleted once its reopen window passes',
+    expireResult.status === 'deleted' &&
+    (await guild.channels.fetch(channel.id).catch(() => null)) === null);
 
   // -------------------------------------------------------------------------
   // Mirrors deploying onto an established server: the panel channel, log

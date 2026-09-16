@@ -154,9 +154,11 @@ least one channel inside it, so:
 
 - **Idle** — invisible to everyone.
 - **A ticket opens** — the category appears for staff, showing `ticket-2011`,
-  and any of them can claim it.
+  and any of them can see and claim it (but not post — see
+  [Claim-gated access](#claim-gated-access) below).
 - **The member** sees only that category, holding only their own ticket.
-- **On close** — the channel is deleted and the category disappears again.
+- **On close** — the channel moves to the **Expired Tickets** category for its
+  reopen window, then is deleted — see [Ticket lifecycle](#ticket-lifecycle).
 
 This is why `Manage Roles` is required: those per-channel overwrites are the
 entire mechanism.
@@ -181,22 +183,44 @@ the panel message was deleted, run `/quick-setup` to repost it.
 
 1. A member picks a language from the panel, then a category in that
    language, and writes their concern.
-2. The bot creates `ticket-<number>`, private to them and the staff role.
+2. The bot creates `ticket-<number>`, visible to them and the staff role, but
+   the staff role can only **read** it until someone claims it (see
+   [Claim-gated access](#claim-gated-access)).
 3. Staff are **mentioned in the channel**, and DMed as well if
    `ENABLE_GUILD_MEMBERS` is on. The member is DMed a confirmation.
-4. The pinned control message carries **Claim**, **Close & Delete** and
+4. The pinned control message carries **Claim**, **Close Ticket** and
    **Admin Panel**.
-5. On **Claim**, the member is told their ticket is being handled, by whom,
-   and that they have `CLAIM_RESPONSE_TIMEOUT_HOURS` to reply before it closes
-   automatically.
+5. On **Claim**, the claiming staff member is granted `Send Messages` on the
+   channel individually, the member is told their ticket is being handled, by
+   whom, and that they have `CLAIM_RESPONSE_TIMEOUT_HOURS` to reply before it
+   closes automatically.
 6. On **Close**, the archive is written to the log, the member is DMed a
    "Ticket Closed" card with their transcript attached, and the channel is
-   deleted ten seconds later.
+   moved to the **Expired Tickets** category. The pinned controls switch to
+   **Reopen** and **Admin Panel**.
+7. Whoever closed it can hit **Reopen** within `TICKET_EXPIRE_WINDOW_MINUTES`
+   to move it back to its original category and reopen it exactly as it was.
+   Once that window passes, the maintenance sweep deletes the channel for
+   good — the log archive and the member's DMed transcript are untouched
+   either way.
 
 One open ticket per member, and at most `TICKET_DAILY_LIMIT` new tickets per
 day for anyone without Administrator (resetting at 00:00 Oman time). Ticket
-state lives in the channel topic (`owner=`, `status=`, `claimedBy=`,
-`claimedAt=`, `ticketNumber=`); configuration lives in `data/tickets.json`.
+state (`owner`, `status`, `claimedBy`, `claimedAt`, `closedBy`, `expiresAt`,
+`ticketNumber`, ...) lives in bot storage, not the channel topic — the topic
+only ever shows the section name and ticket number; configuration lives in
+`data/tickets.json`.
+
+### Claim-gated access
+
+A fresh ticket channel denies `Send Messages` to the whole staff role — they
+can see and read it, and use the **Claim** button (that only needs `Manage
+Messages`/`Manage Channels`), but cannot post until one of them actually
+claims it. Claiming grants that one staff member `Send Messages`
+individually; every other staff member stays read-only until the claimer adds
+them from the **Admin Panel → Add Member** button, which grants that specific
+member the same individual access. The ticket owner is unaffected throughout
+— their own access is granted once, when the ticket is created.
 
 ### Language picker
 
@@ -286,6 +310,7 @@ code never relies on them alone.
 | `GUILD_ID` | — | The one guild this instance serves; others are ignored. |
 | `TICKET_DAILY_LIMIT` | `3` | Tickets per day for a non-admin member. Resets at 00:00 Oman time. |
 | `CLAIM_RESPONSE_TIMEOUT_HOURS` | `12` | Hours the member has to reply after claim before auto-close. |
+| `TICKET_EXPIRE_WINDOW_MINUTES` | `60` | Minutes a closed ticket stays reopenable in Expired Tickets before permanent deletion. |
 | `STREAMER_APPLICATION_CATEGORY_ID` | empty | Enables the Streamer Application section; the category its tickets are created under. |
 | `STREAMER_ROLE_ID` | empty | Role granted automatically on approval. |
 | `STREAMER_REVIEW_ROLE_ID` | `STAFF_ROLE_ID` | Role(s) that can review/approve/reject applications. Comma-separated for more than one. |
