@@ -228,6 +228,17 @@ them from the **Admin Panel → Add Member** button, which grants that specific
 member the same individual access. The ticket owner is unaffected throughout
 — their own access is granted once, when the ticket is created.
 
+**Administrator bypasses channel overwrites entirely, so it's a hole those
+overwrites alone cannot patch.** Discord lets a member with the guild-wide
+`Administrator` permission post in *any* channel
+regardless of what its overwrites say — a Founder/Owner-style role that
+carries it can type in an unclaimed ticket even though the overwrites above
+deny it. The bot backstops this itself: every message in a ticket channel is
+checked against who actually holds an individual send-access overwrite there
+(owner, claimer, or an admin-panel add), and anything from someone outside
+that set is deleted on the spot, Administrator or not, with a short-lived
+notice explaining why.
+
 ### Language picker
 
 The panel's select menu is a language choice first ("Choose your language -

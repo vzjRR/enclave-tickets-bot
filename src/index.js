@@ -17,6 +17,7 @@ const {
   GatewayIntentBits,
   MessageFlags,
   ModalBuilder,
+  OverwriteType,
   PermissionFlagsBits,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
@@ -529,12 +530,43 @@ client.on(Events.ShardReconnecting, (shardId) => {
   console.warn(`Discord shard reconnecting. shard=${shardId}`);
 });
 
+// The channel's permission overwrites are set up so that only the owner, the
+// claimer, and anyone added from the admin panel can actually send a message
+// -- but that only holds for regular members. A person with the guild-wide
+// Administrator permission (Owner/Founder/High Management-style roles often
+// carry it) bypasses every channel overwrite entirely, Discord-side; there is
+// no permission flag that can stop that message from being sent. This is the
+// backstop: it does not try to predict who Discord will let post, it simply
+// deletes anything that lands from someone without an individual send-access
+// overwrite in this channel, after the fact.
+function isSenderAllowedInTicket(channel, userId) {
+  const overwrite = channel.permissionOverwrites.cache.get(userId);
+  return Boolean(
+    overwrite &&
+    overwrite.type === OverwriteType.Member &&
+    overwrite.allow.has(PermissionFlagsBits.SendMessages)
+  );
+}
+
 // Feeds the claim-response timeout: only the ticket owner's own messages
 // reset their clock, so staff chatting in the channel does not.
-client.on(Events.MessageCreate, (message) => {
+client.on(Events.MessageCreate, async (message) => {
   if (!message.guild || message.author?.bot) return;
   if (!isAllowedGuild(message.guild.id)) return;
   if (!isTicketChannel(message.channel)) return;
+
+  if (!isSenderAllowedInTicket(message.channel, message.author.id)) {
+    await message.delete().catch((error) => {
+      console.error(`Failed to remove unauthorized message in ${message.channel.id}:`, error?.message || error);
+    });
+    const notice = await message.channel.send({
+      content: `<@${message.author.id}> only the ticket owner, whoever claimed this ticket, or a member ` +
+        'added from the Admin Panel can write here.'
+    }).catch(() => null);
+    if (notice) setTimeout(() => notice.delete().catch(() => {}), 6_000);
+    return;
+  }
+
   if (getTicketOwnerId(message.channel) !== message.author.id) return;
   ticketOwnerActivity.set(message.channel.id, Date.now());
 });
@@ -3618,13 +3650,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // controls -- clear it so it cannot be clicked a second time.
           await interaction.message.edit({ components: [] }).catch(() => {});
 
-          await channel.send({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0x2ecc71)
-                .setDescription(`Reopened by <@${interaction.user.id}>.`)
-            ]
-          }).catch(() => {});
+          await channel.send({ content: `Reopened by <@${interaction.user.id}>.` }).catch(() => {});
           return;
         }
 
@@ -3699,14 +3725,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ]
           }, 'ticket claimed notice');
 
+          // Plain text, not an embed -- a colored embed here reads as if it
+          // were quoting the banner message above it (same reasoning as the
+          // member's reason echo).
           await interaction.channel.send({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0x2ecc71)
-                .setDescription(
-                  `Claimed by <@${interaction.user.id}>. This ticket is now under process.`
-                )
-            ]
+            content: `Claimed by <@${interaction.user.id}>. This ticket is now under process.`
           }).catch(() => {});
           return;
         }
