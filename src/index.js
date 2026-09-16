@@ -1943,10 +1943,12 @@ async function dmUser(userId, payload, label) {
 async function notifyTicketMemberAdded(channel, addedUserId, addedById) {
   await channel.send({
     content: `<@${addedUserId}> has been added to this ticket by <@${addedById}>.`
-  }).catch(() => {});
+  }).catch((error) => {
+    console.error(`Failed to announce added member in ${channel.id}:`, error?.message || error);
+  });
 
   const ticketNumber = getTicketNumber(channel) || 'unknown';
-  await dmUser(addedUserId, {
+  const delivered = await dmUser(addedUserId, {
     embeds: [
       new EmbedBuilder()
         .setColor(BRAND_COLOR)
@@ -1956,6 +1958,12 @@ async function notifyTicketMemberAdded(channel, addedUserId, addedById) {
         .setTimestamp()
     ]
   }, 'ticket admin-panel add notice');
+
+  // Logged unconditionally (not just on failure) so a run can be confirmed
+  // from the log alone, instead of only ever seeing silence on success.
+  console.log(
+    `Ticket ${ticketNumber}: ${addedUserId} added by ${addedById}; DM delivered=${delivered}`
+  );
 }
 
 function getTicketControlMessageId(channel) {
