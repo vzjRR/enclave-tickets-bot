@@ -1491,12 +1491,6 @@ async function deletePermissionOverwrite(channel, targetId, label) {
   );
 }
 
-function updateTicketEmbed(interaction, updater) {
-  const embed = EmbedBuilder.from(interaction.message.embeds[0]);
-  updater(embed);
-  return embed;
-}
-
 async function sendInteractionResult(interaction, payload) {
   if (interaction.deferred) {
     await interaction.editReply(payload);
@@ -1942,6 +1936,26 @@ async function dmUser(userId, payload, label) {
     console.error(`Failed to DM ${label} to ${userId}:`, error?.message || error);
     return false;
   }
+}
+
+// Shared by the admin panel's Add Member button and /ticket-add, since both
+// grant the same access and should tell the added member the same way.
+async function notifyTicketMemberAdded(channel, addedUserId, addedById) {
+  await channel.send({
+    content: `<@${addedUserId}> has been added to this ticket by <@${addedById}>.`
+  }).catch(() => {});
+
+  const ticketNumber = getTicketNumber(channel) || 'unknown';
+  await dmUser(addedUserId, {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(BRAND_COLOR)
+        .setTitle(`Added to ticket #${ticketNumber}`)
+        .setDescription(`<@${addedById}> added you to <#${channel.id}> in **${channel.guild.name}**.`)
+        .setFooter({ text: BRAND_FOOTER })
+        .setTimestamp()
+    ]
+  }, 'ticket admin-panel add notice');
 }
 
 function getTicketControlMessageId(channel) {
@@ -3378,6 +3392,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           },
           `Add ticket member permissions for ${interaction.channelId}`
         );
+        await notifyTicketMemberAdded(interaction.channel, user.id, interaction.user.id);
         await interaction.editReply({ content: `Added <@${user.id}> to this ticket.` });
         return;
       }
@@ -3693,16 +3708,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // before the claim -- staff have only just picked it up.
           ticketOwnerActivity.set(interaction.channel.id, claimedAt);
 
-          const embed = updateTicketEmbed(interaction, (ticketEmbed) => {
-            ticketEmbed.addFields({
-              name: 'Claimed by',
-              value: `<@${interaction.user.id}>`,
-              inline: true
-            });
-          });
-
+          // The pinned message's embed stays image-only, exactly as posted --
+          // adding a "Claimed by" field to it read as a quote sitting on top
+          // of the banner. Only the components change; who claimed it is
+          // announced by the plain-text notice sent below instead.
           await interaction.message.edit({
-            embeds: [embed],
             components: buildTicketControls('open', interaction.user.id)
           });
 
@@ -3834,6 +3844,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ReadMessageHistory: true,
           AttachFiles: true
         }, `Admin panel add member ${userId}`);
+        await notifyTicketMemberAdded(interaction.channel, userId, interaction.user.id);
         await interaction.editReply({ content: `Added <@${userId}> to this ticket.`, components: [] });
       } else {
         if (userId === getTicketOwnerId(interaction.channel)) {

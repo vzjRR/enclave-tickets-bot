@@ -224,9 +224,12 @@ can see and read it, and use the **Claim** button (that only needs `Manage
 Messages`/`Manage Channels`), but cannot post until one of them actually
 claims it. Claiming grants that one staff member `Send Messages`
 individually; every other staff member stays read-only until the claimer adds
-them from the **Admin Panel → Add Member** button, which grants that specific
-member the same individual access. The ticket owner is unaffected throughout
-— their own access is granted once, when the ticket is created.
+them from the **Admin Panel → Add Member** button (or `/ticket-add`), which
+grants that specific member the same individual access. The ticket owner is
+unaffected throughout — their own access is granted once, when the ticket is
+created. Adding a member also announces it in the channel (plain text, same
+as the claim/reopen notices) and DMs the added member which ticket they were
+added to and who added them.
 
 **Administrator bypasses channel overwrites entirely, so it's a hole those
 overwrites alone cannot patch.** Discord lets a member with the guild-wide
