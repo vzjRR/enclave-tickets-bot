@@ -3283,11 +3283,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      const canManage = await canManageTicket(interaction);
-      const isTicketOwner = getTicketOwnerId(interaction.channel) === interaction.user.id;
-
-      // Ticket owners can close their own ticket; every other action is staff only.
-      if (!canManage && !(interaction.commandName === 'ticket-close' && isTicketOwner)) {
+      // Staff only -- claiming, closing and the admin panel are never
+      // available to the ticket owner, including via these slash commands.
+      if (!(await canManageTicket(interaction))) {
         await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
         return;
       }
@@ -3304,15 +3302,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .catch(() => {});
 
         await interaction.editReply({
-          // The "no log channel configured" detail is an operational note about
-          // the bot's own setup, not something the ticket owner needs to see --
-          // it stays staff-only (it is already console.error'd for the log too).
-          content: !canManage
-            ? `Ticket #${result.ticketNumber} closed and moved to ${EXPIRED_CATEGORY_NAME}.`
-            : result.logged.ok
-              ? `Ticket #${result.ticketNumber} archived to the log channel and moved to ${EXPIRED_CATEGORY_NAME}. ` +
-                `You can reopen it within ${formatExpireWindow()}.`
-              : `Ticket #${result.ticketNumber} closed, but no log channel is configured so nothing was archived. Run /quick-setup.`
+          content: result.logged.ok
+            ? `Ticket #${result.ticketNumber} archived to the log channel and moved to ${EXPIRED_CATEGORY_NAME}. ` +
+              `You can reopen it within ${formatExpireWindow()}.`
+            : `Ticket #${result.ticketNumber} closed, but no log channel is configured so nothing was archived. Run /quick-setup.`
         });
         return;
       }

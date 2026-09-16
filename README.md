@@ -280,8 +280,12 @@ staff-only.
 | `/setup`, `/ticket-panel`, `/ticket-section-add`, `/tickets-refresh` | Manage Server |
 | `/streamer-setup`, `/streamer-application-reset`, `/admin-application-setup` | Manage Server |
 | `/ticket-admin` | Manage Messages or Manage Channels in the ticket |
-| `/ticket-close` | Ticket staff, **or** the member who opened it |
+| `/ticket-close` | Ticket staff |
 | `/ticket-add`, `/ticket-remove`, `/ticket-rename` | Ticket staff |
+
+The ticket owner can never claim, close, or open the admin panel for their own
+ticket -- **Claim**, **Close Ticket**, **Reopen** and **Admin Panel** (button
+or slash command) are staff-only in every form.
 
 All of these are re-checked inside the bot. Discord's "default member
 permissions" are only a default a server admin can override per role, so the
