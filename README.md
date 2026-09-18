@@ -242,6 +242,14 @@ checked against who actually holds an individual send-access overwrite there
 that set is deleted on the spot, Administrator or not, with a short-lived
 notice explaining why.
 
+**Admin Panel and Close are gated tighter than "any staff member."** A
+ticket must actually be claimed before either can be used at all, and once
+claimed, **only the claimer** can open the Admin Panel (the button, every
+select menu/modal it opens, `/ticket-admin`, and its command equivalents
+`/ticket-add`, `/ticket-remove`, `/ticket-rename`) — not other staff, not
+even a server admin. **Close** only needs the ticket to have been claimed by
+*someone*; any staff member can then close it, the same as before.
+
 ### Language picker
 
 The panel's select menu is a language choice first ("Choose your language -

@@ -932,6 +932,32 @@ async function canManageTicket(interaction) {
   );
 }
 
+// Narrower than canManageTicket: the Admin Panel (button, /ticket-admin, and
+// every select menu/modal it opens) is only for whoever actually claimed
+// this specific ticket, and only once it has been claimed at all -- no
+// blanket staff access, no override. Replies and returns false on denial so
+// every call site can just `if (!(await requireAdminPanelAccess(interaction))) return;`.
+async function requireAdminPanelAccess(interaction) {
+  if (!isTicketChannel(interaction.channel)) {
+    await interaction.reply({
+      content: 'This can only be used inside a ticket channel.',
+      flags: MessageFlags.Ephemeral
+    });
+    return false;
+  }
+
+  const claimedBy = getTicketClaimedBy(interaction.channel);
+  if (claimedBy && claimedBy === interaction.user.id) return true;
+
+  await interaction.reply({
+    content: claimedBy
+      ? `Only <@${claimedBy}> (who claimed this ticket) can use the Admin Panel.`
+      : 'This ticket has not been claimed yet. Claim it first to use the Admin Panel.',
+    flags: MessageFlags.Ephemeral
+  });
+  return false;
+}
+
 // setDefaultMemberPermissions is only a DEFAULT. A guild admin can re-grant any
 // command to any role from Server Settings > Integrations, and that override
 // sticks. Authorization has to be re-checked here for it to mean anything.
@@ -3345,14 +3371,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.commandName === 'ticket-admin') {
-        if (!isTicketChannel(interaction.channel)) {
-          await interaction.reply({ content: 'This command only works inside a ticket channel.', flags: MessageFlags.Ephemeral });
-          return;
-        }
-        if (!(await canManageTicket(interaction))) {
-          await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
-          return;
-        }
+        if (!(await requireAdminPanelAccess(interaction))) return;
         await interaction.reply(buildAdminPanel(interaction.channel));
         return;
       }
@@ -3370,6 +3389,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.commandName === 'ticket-close') {
+        if (!getTicketClaimedBy(interaction.channel)) {
+          await interaction.reply({
+            content: 'This ticket has not been claimed yet. Claim it before closing.',
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const channel = await fetchFreshTicketChannel(interaction);
 
@@ -3387,6 +3414,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.commandName === 'ticket-add') {
+        if (!(await requireAdminPanelAccess(interaction))) return;
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user', true);
         await editPermissionOverwrite(
@@ -3406,6 +3434,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.commandName === 'ticket-remove') {
+        if (!(await requireAdminPanelAccess(interaction))) return;
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user', true);
         // Matches the admin panel guard: removing the owner orphans the ticket.
@@ -3423,6 +3452,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.commandName === 'ticket-rename') {
+        if (!(await requireAdminPanelAccess(interaction))) return;
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const name = cleanChannelName(interaction.options.getString('name', true));
         const channel = await fetchFreshTicketChannel(interaction);
@@ -3471,10 +3501,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.customId === 'admin:edit-modal') {
-        if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-          await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
-          return;
-        }
+        if (!(await requireAdminPanelAccess(interaction))) return;
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const channel = await fetchFreshTicketChannel(interaction);
         const newName = cleanChannelName(interaction.fields.getTextInputValue('name'));
@@ -3576,10 +3603,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('admin:')) {
-        if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-          await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
-          return;
-        }
+        if (!(await requireAdminPanelAccess(interaction))) return;
         if (interaction.customId === 'admin:edit') {
           await interaction.showModal(createTicketEditModal(interaction.channel));
           return;
@@ -3677,17 +3701,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
+        // Also checked ahead of the general staff gate below: Admin Panel is
+        // narrower than "any staff member can manage this ticket".
+        if (interaction.customId === 'ticket:admin-panel') {
+          if (!(await requireAdminPanelAccess(interaction))) return;
+          await interaction.reply(buildAdminPanel(interaction.channel));
+          return;
+        }
+
         if (!(await canManageTicket(interaction))) {
           await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
           return;
         }
 
         const claimedBy = getTicketClaimedBy(interaction.channel);
-
-        if (interaction.customId === 'ticket:admin-panel') {
-          await interaction.reply(buildAdminPanel(interaction.channel));
-          return;
-        }
 
         if (interaction.customId === 'ticket:claim') {
           if (claimedBy) {
@@ -3753,6 +3780,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         if (interaction.customId === 'ticket:close') {
+          if (!claimedBy) {
+            await interaction.reply({
+              content: 'This ticket has not been claimed yet. Claim it before closing.',
+              flags: MessageFlags.Ephemeral
+            });
+            return;
+          }
+
           await interaction.deferUpdate();
           const channel = await fetchFreshTicketChannel(interaction);
           await interaction.message
@@ -3828,10 +3863,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isChannelSelectMenu() && interaction.customId === 'admin:category') {
-      if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-        await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
-        return;
-      }
+      if (!(await requireAdminPanelAccess(interaction))) return;
       await interaction.deferUpdate();
       await withTimeout(interaction.channel.setParent(interaction.values[0], { lockPermissions: false }), `Move ticket ${interaction.channelId}`);
       await interaction.editReply({ content: 'Ticket moved to the new category.', components: [] });
@@ -3839,10 +3871,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isUserSelectMenu() && interaction.customId.startsWith('admin:')) {
-      if (!isTicketChannel(interaction.channel) || !(await canManageTicket(interaction))) {
-        await interaction.reply({ content: 'You do not have permission to manage this ticket.', flags: MessageFlags.Ephemeral });
-        return;
-      }
+      if (!(await requireAdminPanelAccess(interaction))) return;
       const userId = interaction.values[0];
       await interaction.deferUpdate();
       if (interaction.customId === 'admin:add-user-select') {
